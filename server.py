@@ -126,25 +126,27 @@ def make_handler(manager, password, providers=None):
             parsed = urlsplit(self.path)
             query = parse_qs(parsed.query)
             try:
-                if parsed.path in ('/', '/app.js', '/style.css', '/fonts.css', '/providers.js'):
-                    name, kind = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/fonts.css': ('fonts.css', 'text/css; charset=utf-8'), '/providers.js': ('providers.js', 'text/javascript; charset=utf-8')}[parsed.path]
+                if parsed.path in ('/', '/app.js', '/style.css', '/fonts.css', '/providers.js', '/center.js'):
+                    name, kind = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/fonts.css': ('fonts.css', 'text/css; charset=utf-8'), '/providers.js': ('providers.js', 'text/javascript; charset=utf-8'), '/center.js': ('center.js', 'text/javascript; charset=utf-8')}[parsed.path]
                     self.reply(200, (ROOT / 'static' / name).read_bytes(), kind)
                 elif parsed.path == '/api/jobs':
                     self.reply(200, manager.jobs())
                 elif parsed.path == '/api/results':
                     self.reply(200, manager.results(query.get('id', [''])[0], query.get('view', ['hits'])[0],
                         region=query.get('region',[''])[0], colo=query.get('colo',[''])[0],
-                        search=query.get('search',[''])[0], sort=query.get('sort',['newest'])[0], cursor=query.get('cursor',[''])[0]))
+                        search=query.get('search',[''])[0], sort=query.get('sort',['newest'])[0], cursor=query.get('cursor',[''])[0],provider=query.get('provider',[''])[0]))
+                elif parsed.path == '/api/catalog':
+                    self.reply(200,manager.catalog())
                 elif parsed.path == '/api/providers':
                     self.reply(200,providers.list())
                 elif parsed.path == '/api/provider':
                     self.reply(200,providers.get(query.get('id',[''])[0]))
                 elif parsed.path == '/api/facets':
-                    self.reply(200, manager.facets(query.get('id',[''])[0], query.get('view',['hits'])[0]))
+                    self.reply(200, manager.facets(query.get('id',[''])[0], query.get('view',['hits'])[0],query.get('provider',[''])[0]))
                 elif parsed.path == '/api/compare':
                     self.reply(200, manager.compare(query.get('old',[''])[0], query.get('new',[''])[0], query.get('kind',['new'])[0]))
                 elif parsed.path == '/api/export':
-                    self.export(query.get('id', [''])[0], query.get('view', ['hits'])[0], query.get('region',[''])[0], query.get('colo',[''])[0], query.get('search',[''])[0])
+                    self.export(query.get('id', [''])[0], query.get('view', ['hits'])[0], query.get('region',[''])[0], query.get('colo',[''])[0], query.get('search',[''])[0],query.get('provider',[''])[0])
                 else:
                     self.reply(404, {'error': '未找到'})
             except (ValueError, TypeError) as exc:
@@ -152,10 +154,10 @@ def make_handler(manager, password, providers=None):
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
-        def export(self, ident, view, region='', colo='', search=''):
-            condition, args = manager.condition(ident,view,region,colo,search)
+        def export(self, ident, view, region='', colo='', search='',provider=''):
+            condition, args, sources = manager.selection_condition(ident,view,region,colo,search,provider)
             with connect(manager.path) as db:
-                if not db.execute('SELECT 1 FROM jobs WHERE id=?', (ident,)).fetchone():
+                if ident!='*' and not db.execute('SELECT 1 FROM jobs WHERE id=?', (ident,)).fetchone():
                     self.reply(404, {'error': '任务不存在'})
                     return
                 self.send_response(200)
@@ -171,14 +173,15 @@ def make_handler(manager, password, providers=None):
                 self.wfile.write(buf.getvalue().encode())
                 # Short paginated reads avoid holding a WAL snapshot during a slow download.
                 cursor = 0
-                maximum = db.execute('SELECT COALESCE(MAX(rowid),0) FROM results WHERE job=?', (ident,)).fetchone()[0]
+                maximum = db.execute(f'SELECT COALESCE(MAX(rowid),0) FROM results WHERE {condition}', args).fetchone()[0]
                 while True:
-                    rows = db.execute(f'SELECT rowid,data FROM results WHERE {condition} AND rowid>? AND rowid<=? ORDER BY rowid LIMIT 200', args + [cursor, maximum]).fetchall()
+                    rows = db.execute(f'SELECT rowid,job,data FROM results WHERE {condition} AND rowid>? AND rowid<=? ORDER BY rowid LIMIT 200', args + [cursor, maximum]).fetchall()
                     if not rows:
                         break
                     for row in rows:
                         data = json.loads(row['data'])
                         data.setdefault('request_ms', data.get('latency_ms',''))
+                        data.update(job_id=row['job'],provider_name=sources.get(row['job'],{}).get('provider_name','未知来源'))
                         # Remote headers must not become spreadsheet formulas.
                         for key, value in data.items():
                             if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@')):

@@ -12,6 +12,7 @@ import uuid
 
 PRESETS=[
     dict(id='dmit',name='DMIT',asns=[906,132110,32519]),
+    dict(id='bwh',name='BWH / 搬瓦工（IT7）',asns=[25820],notes='IT7 主网 ASN 公告，不保证覆盖所有机房、线路及租用网段。',reference='https://www.it7.net/'),
     dict(id='vultr',name='Vultr',asns=[20473]),
     dict(id='digitalocean',name='DigitalOcean',asns=[14061]),
     dict(id='linode',name='Linode / Akamai',asns=[63949]),

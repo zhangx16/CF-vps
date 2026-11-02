@@ -80,7 +80,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.request('GET', '/api/export?id=missing')[0], 404)
 
     def test_provider_selection_and_adaptive_settings(self):
-        self.assertEqual(len(json.loads(self.request('GET','/api/providers')[2])),6)
+        self.assertEqual(len(json.loads(self.request('GET','/api/providers')[2])),7)
         self.assertEqual(self.request('POST','/api/start',{'provider':'vultr'})[0],400)
         self.assertEqual(len(self.manager.jobs()),0)
         self.providers.state['cache']['vultr']=dict(networks=['8.8.8.0/30'],updated_at=123,source='fixture')

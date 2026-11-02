@@ -154,3 +154,17 @@ class HistoryTests(unittest.TestCase):
     def test_connection_is_closed_on_exit(self):
         with connect(self.path) as db:db.execute('SELECT 1')
         with self.assertRaises(sqlite3.ProgrammingError):db.execute('SELECT 1')
+
+    def test_cross_task_catalog_groups_and_searches_by_provider(self):
+        first=self.run_job({1,2,3})
+        second=self.run_job({1,2},{'targets':'8.8.8.0/30','ports':'443','provider':'vultr','provider_name':'Vultr','provider_asns':[20473]})
+        self.assertEqual(self.manager.results('*',view='all')['total'],8)
+        matches=self.manager.results('*',view='all',provider='vultr',search='8.8.8.1')
+        self.assertEqual(matches['total'],1)
+        self.assertEqual(matches['items'][0]['job_id'],second)
+        self.assertEqual(matches['items'][0]['provider_name'],'Vultr')
+        self.assertEqual(self.manager.results('*',view='all',search='8.8.8.1')['total'],2)
+        groups={p['id']:p for p in self.manager.catalog()['providers']}
+        self.assertEqual(groups['vultr']['records'],2)
+        self.assertEqual(groups['custom_targets']['records'],6)
+        self.assertEqual(self.manager.facets('*',view='all',provider='vultr')['regions'][0]['count'],1)

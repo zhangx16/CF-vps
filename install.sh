@@ -76,7 +76,7 @@ install -d -m 755 "$NEW_RELEASE" "$NEW_RELEASE/static"
 for FILE in server.py engine.py adaptive.py providers.py probing.py scan_dmit_cf_fallback.py manage.py dmit_prefixes.txt; do
   install -m 644 "$TMP_DIR/source/$FILE" "$NEW_RELEASE/$FILE"
 done
-for FILE in index.html app.js providers.js style.css fonts.css; do install -m 644 "$TMP_DIR/source/static/$FILE" "$NEW_RELEASE/static/$FILE"; done
+for FILE in index.html app.js providers.js center.js style.css fonts.css; do install -m 644 "$TMP_DIR/source/static/$FILE" "$NEW_RELEASE/static/$FILE"; done
 printf '%s\n' "$VERSION" > "$NEW_RELEASE/.version"
 if [[ -n "$SNAPSHOT" ]]; then printf '%s\n' "$SNAPSHOT" > "$NEW_RELEASE/.rollback-backup"; chmod 600 "$NEW_RELEASE/.rollback-backup"; fi
 if [[ -L /opt/cf-vps ]]; then

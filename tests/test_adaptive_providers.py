@@ -67,7 +67,7 @@ class ProviderTests(unittest.TestCase):
         self.fail('refresh did not finish')
 
     def test_presets_and_strict_target_selection(self):
-        self.assertEqual(len(self.store.list()),6)
+        self.assertEqual(len(self.store.list()),7)
         p,nets=self.store.resolve('dmit')
         self.assertTrue(nets)
         _,selected=self.store.resolve('dmit',nets[:2])

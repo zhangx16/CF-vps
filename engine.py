@@ -13,9 +13,10 @@ from pathlib import Path
 
 from probing import probe
 from adaptive import AdaptiveLimiter
+from providers import normalize
 
 ROOT = Path(__file__).resolve().parent
-FIELDS = ['ip', 'port', 'status', 'evidence', 'verification', 'server', 'cf_ray', 'colo', 'loc',
+FIELDS = ['ip', 'port', 'job_id', 'provider_name', 'status', 'evidence', 'verification', 'server', 'cf_ray', 'colo', 'loc',
           'trace_ip', 'verified', 'request_ms', 'connect_ms', 'tls_ms', 'ttfb_ms', 'http_status',
           'verify_cf_ray', 'verify_colo', 'verify_error', 'error_kind', 'err', 'observed_at']
 
@@ -115,6 +116,8 @@ class Manager:
         self.active = None
         self.live = {}
         self.controller = None
+        text=(ROOT/'dmit_prefixes.txt').read_text()
+        self.builtin_networks=set(normalize([line.split('#',1)[0].strip() for line in text.splitlines() if line.split('#',1)[0].strip()]))
         with connect(self.path) as db:
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -150,6 +153,7 @@ class Manager:
                 CREATE INDEX IF NOT EXISTS result_region ON results(job,loc);
                 CREATE INDEX IF NOT EXISTS result_latency ON results(job,latency);
                 CREATE INDEX IF NOT EXISTS result_job ON results(job);
+                CREATE INDEX IF NOT EXISTS result_global_status ON results(status,loc);
             ''')
             db.execute("UPDATE jobs SET status='interrupted', updated=? WHERE status IN ('running','stopping')", (time.time(),))
 
@@ -158,7 +162,7 @@ class Manager:
             rows = [dict(r) for r in db.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT 100')]
         with self.lock:
             for row in rows:
-                row['config'] = json.loads(row['config'])
+                row['config'] = self.source_config(json.loads(row['config']))
                 if row['id'] == self.active:
                     row.update(self.live)
                     if self.controller:
@@ -166,6 +170,44 @@ class Manager:
                     if self.stop_event.is_set():
                         row['status'] = 'stopping'
         return rows
+
+    def source_config(self,config):
+        config=dict(config)
+        if 'provider' not in config:
+            if set(config.get('networks',[]))==self.builtin_networks:
+                config.update(provider='dmit',provider_name='DMIT（目标匹配内置快照）')
+            else:
+                config.update(provider='',provider_name='自定义 / 旧任务')
+        return config
+
+    def job_sources(self):
+        sources={}
+        with connect(self.path) as db:
+            for row in db.execute('SELECT id,created,status,config,done,hits FROM jobs ORDER BY created DESC'):
+                config=self.source_config(json.loads(row['config']))
+                sources[row['id']]=dict(id=row['id'],created=row['created'],status=row['status'],done=row['done'],hits=row['hits'],
+                    provider=config.get('provider') or 'custom_targets',provider_name=config.get('provider_name') or '自定义目标',kind=config.get('kind','scan'))
+        return sources
+
+    def catalog(self):
+        jobs=list(self.job_sources().values())
+        groups={}
+        for job in jobs:
+            key=job['provider']
+            group=groups.setdefault(key,dict(id=key,name=job['provider_name'],records=0,hits=0,jobs=0))
+            group['records']+=job['done'];group['hits']+=job['hits'];group['jobs']+=1
+        return dict(jobs=jobs,providers=list(groups.values()))
+
+    def selection_condition(self,ident,view='hits',region='',colo='',search='',provider=''):
+        condition,args=self.condition(ident,view,region,colo,search)
+        sources=self.job_sources()
+        if provider:
+            ids=[key for key,source in sources.items() if source['provider']==provider and (ident=='*' or key==ident)]
+            scope='job IN ('+','.join('?' for _ in ids)+')' if ids else '0=1'
+            condition=scope+condition[len('job=?'):];args=ids+args[1:]
+        elif ident=='*':
+            condition='1=1'+condition[len('job=?'):];args=args[1:]
+        return condition,args,sources
 
     def start(self, raw=None, resume=None, retest=None):
         with self.lock:
@@ -352,14 +394,14 @@ class Manager:
             args.extend([search.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%',search])
         return ' AND '.join(parts), args
 
-    def facets(self, ident, view='hits'):
-        condition, args = self.condition(ident,view)
+    def facets(self, ident, view='hits',provider=''):
+        condition, args, _ = self.selection_condition(ident,view,provider=provider)
         with connect(self.path) as db:
             regions = [dict(r) for r in db.execute(f"SELECT COALESCE(NULLIF(loc,''),'UNKNOWN') AS value,COUNT(*) AS count FROM results WHERE {condition} GROUP BY value ORDER BY count DESC",args)]
             colos = [dict(r) for r in db.execute(f"SELECT colo AS value,COUNT(*) AS count FROM results WHERE {condition} AND colo!='' GROUP BY colo ORDER BY count DESC",args)]
         return dict(regions=regions,colos=colos)
 
-    def results(self, ident, view='hits', page=1, limit=100, region='', colo='', search='', sort='newest', cursor=''):
+    def results(self, ident, view='hits', page=1, limit=100, region='', colo='', search='', sort='newest', cursor='',provider=''):
         page = max(1,min(int(page),100000))
         limit = max(1,min(int(limit),200))
         choices = {'newest':('rowid','DESC'),'latency_asc':('COALESCE(latency,1e30)','ASC'),
@@ -368,7 +410,7 @@ class Manager:
         if sort not in choices:
             raise ValueError('排序无效')
         key, direction = choices[sort]
-        condition, args = self.condition(ident,view,region,colo,search)
+        condition, args, sources = self.selection_condition(ident,view,region,colo,search,provider)
         with connect(self.path) as db:
             total = db.execute(f'SELECT COUNT(*) FROM results WHERE {condition}',args).fetchone()[0]
             where, values = condition, list(args)
@@ -384,7 +426,7 @@ class Manager:
                 op = '<' if direction == 'DESC' else '>'
                 where += f' AND ({key}{op}? OR ({key}=? AND rowid<?))'
                 values.extend([token['value'],token['value'],token['rowid']])
-            rows = db.execute(f'SELECT rowid,{key} AS sortkey,data FROM results WHERE {where} ORDER BY {key} {direction},rowid DESC LIMIT ?',values+[limit+1]).fetchall()
+            rows = db.execute(f'SELECT rowid,job,{key} AS sortkey,data FROM results WHERE {where} ORDER BY {key} {direction},rowid DESC LIMIT ?',values+[limit+1]).fetchall()
             more = len(rows)>limit
             rows = rows[:limit]
             items = []
@@ -392,6 +434,8 @@ class Manager:
                 data = json.loads(row['data'])
                 history = db.execute('SELECT MIN(CASE WHEN hit=1 THEN observed END) AS first_seen,MAX(CASE WHEN confirmed=1 THEN observed END) AS last_confirmed,COUNT(*) AS checks,COALESCE(SUM(hit),0) AS successes,COALESCE(SUM(confirmed),0) AS confirmations FROM observations WHERE ip=? AND port=?',(data['ip'],data['port'])).fetchone()
                 data['history'] = dict(history)
+                source=sources.get(row['job'],{})
+                data.update(job_id=row['job'],provider_name=source.get('provider_name','未知来源'),job_created=source.get('created'))
                 items.append(data)
             next_cursor = ''
             if more:

@@ -25,3 +25,4 @@ jobs:
           bash -n install.sh
           node --check static/app.js
           node --check static/providers.js
+          node --check static/center.js

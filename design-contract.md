@@ -70,3 +70,7 @@ A server scanning console whose main task is inspecting progress and filtering/r
 ## Resource and provider additions
 
 The user subsequently requested adaptive concurrency and selectable provider prefix inventories. Runtime resource information is a secondary line in the existing task card, using the established text scale. Provider inventory is a disclosure/table module, reached from the existing sidebar, with no additional card grid. Its selectors, row checkboxes, pagination and custom ASN form reuse the same controls and tables. The scan dialog adds adaptive mode and normal minimum concurrency; the configured concurrency field is explicitly the ceiling. Anchors added: `providers`.
+
+## Result center
+
+The user requested a dedicated left-side results module. A reference-style navigation group exposes all observations, strict confirmations, provider categories and exit-region categories. The main result table is reused in a separate view with provider/task context selectors and source columns; no duplicate card grid is added. Cross-task rows retain their task provenance. Bulk retest requires a single task. Existing filters, sorting, clipboard and CSV continue to work in this view.
