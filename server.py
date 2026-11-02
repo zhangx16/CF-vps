@@ -181,7 +181,7 @@ def make_handler(manager, password, providers=None):
                     for row in rows:
                         data = json.loads(row['data'])
                         data.setdefault('request_ms', data.get('latency_ms',''))
-                        data.update(job_id=row['job'],provider_name=sources.get(row['job'],{}).get('provider_name','未知来源'))
+                        data.update(job_id=row['job'],task_name=sources.get(row['job'],{}).get('task_name',''),provider_name=sources.get(row['job'],{}).get('provider_name','未知来源'))
                         # Remote headers must not become spreadsheet formulas.
                         for key, value in data.items():
                             if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@')):

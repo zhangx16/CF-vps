@@ -16,7 +16,7 @@ from adaptive import AdaptiveLimiter
 from providers import normalize
 
 ROOT = Path(__file__).resolve().parent
-FIELDS = ['ip', 'port', 'job_id', 'provider_name', 'status', 'evidence', 'verification', 'server', 'cf_ray', 'colo', 'loc',
+FIELDS = ['ip', 'port', 'job_id', 'task_name', 'provider_name', 'status', 'evidence', 'verification', 'server', 'cf_ray', 'colo', 'loc',
           'trace_ip', 'verified', 'request_ms', 'connect_ms', 'tls_ms', 'ttfb_ms', 'http_status',
           'verify_cf_ray', 'verify_colo', 'verify_error', 'error_kind', 'err', 'observed_at']
 
@@ -40,6 +40,10 @@ def connect(path):
 def prepare(raw):
     if not isinstance(raw, dict):
         raise ValueError('配置必须是 JSON 对象')
+    task_name = raw.get('task_name', '')
+    if not isinstance(task_name,str) or len(task_name)>60 or any(ord(c)<32 or ord(c)==127 for c in task_name):
+        raise ValueError('任务名称应为最多 60 个字符的单行文本')
+    task_name=task_name.strip()
     text = raw.get('targets', '')
     if not isinstance(text, str) or len(text.encode()) > 65536:
         raise ValueError('目标输入过长')
@@ -77,7 +81,7 @@ def prepare(raw):
     if total > 2_000_000:
         raise ValueError('单次任务最多 200 万个 IP:端口，请拆分网段')
     return dict(networks=[str(n) for n in nets], ports=ports, concurrency=concurrency,
-                timeout=timeout, attempts=attempts, rps=rps, total=total, kind='scan',adaptive=adaptive,min_concurrency=minimum,provider=raw.get('provider','dmit' if builtin else ''),provider_name=raw.get('provider_name','DMIT（内置快照）' if builtin else '自定义目标'),provider_asns=raw.get('provider_asns',[]),provider_updated_at=raw.get('provider_updated_at'),provider_country=raw.get('provider_country',''))
+                timeout=timeout, attempts=attempts, rps=rps, total=total, kind='scan',task_name=task_name,adaptive=adaptive,min_concurrency=minimum,provider=raw.get('provider','dmit' if builtin else ''),provider_name=raw.get('provider_name','DMIT（内置快照）' if builtin else '自定义目标'),provider_asns=raw.get('provider_asns',[]),provider_updated_at=raw.get('provider_updated_at'),provider_country=raw.get('provider_country',''))
 
 
 def targets(config):
@@ -187,7 +191,7 @@ class Manager:
             for row in db.execute('SELECT id,created,status,config,done,hits FROM jobs ORDER BY created DESC'):
                 config=self.source_config(json.loads(row['config']))
                 sources[row['id']]=dict(id=row['id'],created=row['created'],status=row['status'],done=row['done'],hits=row['hits'],
-                    provider=config.get('provider') or 'custom_targets',provider_name=config.get('provider_name') or '自定义目标',kind=config.get('kind','scan'))
+                    task_name=config.get('task_name',''),provider=config.get('provider') or 'custom_targets',provider_name=config.get('provider_name') or '自定义目标',kind=config.get('kind','scan'))
         return sources
 
     def catalog(self):
@@ -454,7 +458,7 @@ class Manager:
                 data['history'] = dict(history)
                 data['favorite'] = db.execute('SELECT 1 FROM favorites WHERE ip=?',(data['ip'],)).fetchone() is not None
                 source=sources.get(row['job'],{})
-                data.update(job_id=row['job'],provider_name=source.get('provider_name','未知来源'),job_created=source.get('created'))
+                data.update(job_id=row['job'],task_name=source.get('task_name',''),provider_name=source.get('provider_name','未知来源'),job_created=source.get('created'))
                 items.append(data)
             next_cursor = ''
             if more:

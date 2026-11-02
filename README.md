@@ -195,3 +195,5 @@ python3 scan_dmit_cf_fallback.py --ip 你的已授权IP --ports 443 --output hit
 界面设计依据与审查记录见 [design-contract.md](design-contract.md)，第三方许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 原 CLI 的批处理/CSV 续跑逻辑保留兼容性；固定 worker、SQLite 检查点和完整任务恢复由新的网页控制台提供。不要同时启动两个 `server.py` 实例共享同一数据目录。
+
+手动输入或导入 IP/CIDR 时，可填写最多 60 字的任务名称。名称显示在任务选择、历史对比、结果中心任务来源及 CSV 的 `task_name` 列；留空沿用默认显示，暂停续扫保留名称。服务商来源信息独立保留。

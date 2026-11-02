@@ -18,7 +18,7 @@ async function api(path,data) {
 }
 function duration(seconds) { if(seconds==null)return '—'; return seconds<60?`${seconds} 秒`:`${Math.floor(seconds/3600)} 时 ${Math.floor(seconds%3600/60)} 分`; }
 function timestamp(value) { return value?new Date(value*1000).toLocaleString('zh-CN'):'—'; }
-function jobLabel(j) { return `${timestamp(j.created)} · ${j.config.provider_name||'目标快照'} · ${j.config.kind==='retest'?'复测 · ':''}${labels[j.status]} · ${j.total.toLocaleString()} 次`; }
+function jobLabel(j) { return `${j.config.task_name?j.config.task_name+' · ':''}${timestamp(j.created)} · ${j.config.provider_name||'目标快照'} · ${j.config.kind==='retest'?'复测 · ':''}${labels[j.status]} · ${j.total.toLocaleString()} 次`; }
 function options(select, values, title, formatter=v=>v) {
   const previousValue=select.value; select.replaceChildren();
   if(title) { const o=document.createElement('option'); o.value='';o.textContent=title;select.append(o); }
@@ -49,7 +49,7 @@ function renderJobs() {
   const pending=records.find(j=>j.id===selected&&['stopped','interrupted','failed'].includes(j.status))||records.filter(j=>['stopped','interrupted','failed'].includes(j.status)).sort((a,b)=>b.updated-a.updated)[0];
   const hasActive=records.some(j=>['running','stopping'].includes(j.status));
   $('resume-notice').hidden=!pending||hasActive;
-  if(pending){$('resume-notice-detail').textContent=`${pending.config.provider_name||'目标快照'} · 已完成 ${pending.done.toLocaleString()} / ${pending.total.toLocaleString()} 次；保留原参数并跳过已完成目标。`;$('resume-last').dataset.id=pending.id;$('view-last').dataset.id=pending.id;}
+  if(pending){$('resume-notice-detail').textContent=`${pending.config.task_name?pending.config.task_name+' · ':''}${pending.config.provider_name||'目标快照'} · 已完成 ${pending.done.toLocaleString()} / ${pending.total.toLocaleString()} 次；保留原参数并跳过已完成目标。`;$('resume-last').dataset.id=pending.id;$('view-last').dataset.id=pending.id;}
   $('resume-last').disabled=busy||hasActive;
   if(!$('compare-old').dataset.initialized&&records.length>=2) { $('compare-old').value=records[1].id;$('compare-new').value=records[0].id;$('compare-old').dataset.initialized='1'; }
   const j=records.find(j=>j.id===selected),active=records.some(j=>['running','stopping'].includes(j.status));
@@ -95,7 +95,7 @@ async function renderResults() {
     const h=r.history||{},ms=r.request_ms??r.latency_ms;
     const values=[levels[r.evidence]||labels[r.status]||r.status,verifications[r.verification]||(r.verified==='1'?'旧版确认':'—'),ms===''||ms==null?'—':`${ms} ms`,r.colo||'—',regionName(r.loc),timestamp(h.first_seen),timestamp(h.last_confirmed),h.checks?`${(h.successes/h.checks*100).toFixed(0)}% (${h.successes}/${h.checks})`:'—',errors[r.error_kind]||errors[r.verify_error]||r.err||r.server||'—'];
     for(const value of values){const cell=document.createElement('td');cell.textContent=value;tr.append(cell);}
-    const jobCell=document.createElement('td');jobCell.className='catalog-column';jobCell.textContent=timestamp(r.job_created)+' · '+(r.job_id||'').slice(0,8);tr.append(jobCell);
+    const jobCell=document.createElement('td');jobCell.className='catalog-column';jobCell.textContent=(r.task_name?r.task_name+' · ':'')+timestamp(r.job_created)+' · '+(r.job_id||'').slice(0,8);tr.append(jobCell);
     tr.children[5].title=`连接 ${r.connect_ms??'—'} ms / TLS ${r.tls_ms??'—'} ms / 首字节 ${r.ttfb_ms??'—'} ms（从请求开始计时）`;
     body.append(tr);
   }
@@ -115,7 +115,7 @@ async function refresh() {
 }
 async function action(path,data) {
   if(busy)return;busy=true;renderJobs();message('');
-  try { const result=await api(path,data);if(result.id){selected=result.id;resetPage();checked.clear();if(window.resultCenter?.active)window.resultCenter.pendingJob=result.id;if(path==='/api/start')$('scan-dialog').close();} }
+  try { const result=await api(path,data);if(result.id){selected=result.id;resetPage();checked.clear();if(window.resultCenter?.active)window.resultCenter.pendingJob=result.id;if(path==='/api/start'){$('scan-dialog').close();$('task-name').value='';}} }
   catch(e){message(e);}finally{busy=false;await refresh();}
 }
 async function comparison() {
@@ -125,7 +125,7 @@ async function comparison() {
     $('compare-items').replaceChildren();for(const r of result.items)$('compare-items').append(ipButton(r.ip,r.port));
   }catch(e){message(e);}
 }
-$('scan-form').onsubmit=e=>{e.preventDefault();action('/api/start',{targets:$('targets').value,ports:$('ports').value,concurrency:Number($('concurrency').value),timeout:Number($('timeout').value),attempts:Number($('attempts').value),rps:Number($('rps').value),adaptive:$('adaptive').checked,min_concurrency:Number($('min-concurrency').value),...(window.providerSelection?.targets===$('targets').value?{provider:window.providerSelection.id,prefixes:window.providerSelection.prefixes}:{})});};
+$('scan-form').onsubmit=e=>{e.preventDefault();action('/api/start',{task_name:$('task-name').value,targets:$('targets').value,ports:$('ports').value,concurrency:Number($('concurrency').value),timeout:Number($('timeout').value),attempts:Number($('attempts').value),rps:Number($('rps').value),adaptive:$('adaptive').checked,min_concurrency:Number($('min-concurrency').value),...(window.providerSelection?.targets===$('targets').value?{provider:window.providerSelection.id,prefixes:window.providerSelection.prefixes}:{})});};
 function viewPending(id){if(window.resultCenter?.active)window.resultCenter.exit();selected=id;rememberJob();resetPage();checked.clear();renderJobs();refresh();$('overview').scrollIntoView();}
 $('resume-last').onclick=()=>{const id=$('resume-last').dataset.id;viewPending(id);action('/api/resume',{id});};
 $('view-last').onclick=()=>viewPending($('view-last').dataset.id);

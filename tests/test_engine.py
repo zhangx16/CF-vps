@@ -85,6 +85,26 @@ class EngineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.manager.favorite(ip,enabled)
 
+    def test_named_task_persists_in_results_catalog_and_resume(self):
+        async def hit(ip,port,timeout,sem,**kwargs):
+            self.manager.stop_event.set()
+            return dict(ip=ip,port=port,status='hit',verified='1',latency_ms=1)
+        name='香港自选网段 · 晚间测试'
+        with patch('engine.probe',hit):
+            ident=self.manager.start({'targets':'8.8.8.0/30','ports':'443','concurrency':1,'task_name':'  '+name+'  '})
+            self.wait()
+        self.manager=Manager(self.manager.path)
+        self.assertEqual(self.manager.jobs()[0]['config']['task_name'],name)
+        self.assertEqual(self.manager.catalog()['jobs'][0]['task_name'],name)
+        self.assertEqual(self.manager.results(ident,'all')['items'][0]['task_name'],name)
+        with patch('engine.probe',hit):
+            self.manager.start(resume=ident)
+            self.wait()
+        self.assertEqual(self.manager.jobs()[0]['config']['task_name'],name)
+        self.assertEqual(prepare({'targets':'8.8.8.8'})['task_name'],'')
+        for value in [None,{},'a'*61,'line\nname']:
+            with self.assertRaises(ValueError):prepare({'targets':'8.8.8.8','task_name':value})
+
     def test_failure_is_visible(self):
         async def fail(*args, **kwargs):
             raise RuntimeError('simulated failure')
