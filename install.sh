@@ -16,17 +16,17 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 curl -fL --retry 3 --connect-timeout 15 --max-time 120 "https://api.github.com/repos/$REPO/tarball/$REF" -o "$TMP_DIR/source.tar.gz"
 mkdir "$TMP_DIR/source"
 tar -xzf "$TMP_DIR/source.tar.gz" --strip-components=1 -C "$TMP_DIR/source"
-python3 -m py_compile "$TMP_DIR/source/server.py" "$TMP_DIR/source/engine.py" "$TMP_DIR/source/scan_dmit_cf_fallback.py"
+python3 -m py_compile "$TMP_DIR/source/server.py" "$TMP_DIR/source/engine.py" "$TMP_DIR/source/scan_dmit_cf_fallback.py" "$TMP_DIR/source/manage.py"
 id cf-vps >/dev/null 2>&1 || useradd --system --home-dir /var/lib/cf-vps --shell /usr/sbin/nologin cf-vps
-install -d -m 755 /opt/cf-vps /opt/cf-vps/static
+install -d -m 755 /opt/cf-vps /opt/cf-vps/static /usr/local/bin
 install -d -o cf-vps -g cf-vps -m 750 /var/lib/cf-vps
 NEW_CONFIG=0
 if [[ ! -f /etc/cf-vps.env ]]; then
   PASSWORD=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
-  BIND="${CFVPS_BIND:-127.0.0.1}"
+  BIND="${CFVPS_BIND:-0.0.0.0}"
   PORT="${CFVPS_LISTEN_PORT:-8787}"
   [[ "$BIND" =~ ^[a-zA-Z0-9.:_-]+$ && "$PORT" =~ ^[0-9]+$ ]] || { echo '无效监听地址或端口'; exit 1; }
-  python3 -c 'import sys; assert 1 <= int(sys.argv[1]) <= 65535' "$PORT"
+  python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1]); assert 1 <= int(sys.argv[2]) <= 65535' "$BIND" "$PORT"
   umask 077
   cat > /etc/cf-vps.env <<EOF
 CFVPS_PASSWORD=$PASSWORD
@@ -36,16 +36,38 @@ CFVPS_DATA=/var/lib/cf-vps
 EOF
   NEW_CONFIG=1
 fi
+if [[ "$NEW_CONFIG" -eq 0 ]]; then
+  python3 - "$TMP_DIR/source" <<'PYBACKUP'
+import sys
+sys.path.insert(0, sys.argv[1])
+import manage
+manage.backup()
+PYBACKUP
+fi
+# An explicit bind address also updates existing installs. Otherwise preserve settings.
+if [[ "$NEW_CONFIG" -eq 0 && -n "${CFVPS_BIND:-}" ]]; then
+  python3 - "$TMP_DIR/source" "$CFVPS_BIND" <<'PYCFG'
+import ipaddress
+import sys
+sys.path.insert(0, sys.argv[1])
+import manage
+ipaddress.IPv4Address(sys.argv[2])
+config = manage.read_config()
+config['CFVPS_HOST'] = sys.argv[2]
+manage.write_config(config)
+PYCFG
+fi
 # Preserve runtime data, password and custom port on upgrades.
 if systemctl is-active --quiet cf-vps.service; then
   systemctl stop cf-vps.service
 fi
-for FILE in server.py engine.py scan_dmit_cf_fallback.py dmit_prefixes.txt; do
+for FILE in server.py engine.py scan_dmit_cf_fallback.py manage.py dmit_prefixes.txt; do
   install -m 644 "$TMP_DIR/source/$FILE" "/opt/cf-vps/$FILE"
 done
 for FILE in index.html app.js style.css; do
   install -m 644 "$TMP_DIR/source/static/$FILE" "/opt/cf-vps/static/$FILE"
 done
+install -m 755 "$TMP_DIR/source/manage.py" /usr/local/bin/cf-vps
 cat > /etc/systemd/system/cf-vps.service <<'EOF'
 [Unit]
 Description=CF VPS scan dashboard
@@ -82,10 +104,17 @@ if ! systemctl is-active --quiet cf-vps.service; then
   journalctl -u cf-vps.service -n 30 --no-pager
   exit 1
 fi
-printf '\n安装完成。配置：/etc/cf-vps.env；数据：/var/lib/cf-vps\n'
-if [[ "$NEW_CONFIG" -eq 1 ]]; then
-  printf '监听地址：http://%s:%s\n用户名：admin\n密码：%s\n' "$BIND" "$PORT" "$PASSWORD"
-else
-  printf '已保留原密码与监听配置。\n'
+# Open only the service's TCP port when UFW is already active; do not enable/reset a firewall.
+BIND=$(python3 -c 'import sys; sys.path.insert(0,"/opt/cf-vps"); import manage; print(manage.read_config().get("CFVPS_HOST","0.0.0.0"))')
+PORT=$(python3 -c 'import sys; sys.path.insert(0,"/opt/cf-vps"); import manage; print(manage.read_config().get("CFVPS_PORT","8787"))')
+if [[ "$BIND" == '0.0.0.0' ]] && command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q '^Status: active'; then
+  ufw allow "$PORT/tcp"
 fi
-printf '默认仅本机监听。通过 SSH 隧道访问，或配置 HTTPS 反向代理（见 README）。\n'
+printf '\n安装完成。输入 cf-vps 打开管理菜单。\n'
+python3 - <<'PYINFO'
+import sys
+sys.path.insert(0, '/opt/cf-vps')
+import manage
+manage.info(show_password=True)
+PYINFO
+printf '公网访问还需在云安全组放行对应 TCP 端口；域名 HTTPS 配置见 README。\n'

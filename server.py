@@ -162,7 +162,7 @@ def main():
     except BlockingIOError:
         raise SystemExit('该数据目录已有一个面板实例正在运行')
     manager = Manager(data / 'scan.db')
-    server = ThreadingHTTPServer((os.environ.get('CFVPS_HOST', '127.0.0.1'), int(os.environ.get('CFVPS_PORT', '8787'))), make_handler(manager, password))
+    server = ThreadingHTTPServer((os.environ.get('CFVPS_HOST', '0.0.0.0'), int(os.environ.get('CFVPS_PORT', '8787'))), make_handler(manager, password))
     def shutdown(*_):
         manager.stop()
         threading.Thread(target=server.shutdown, daemon=True).start()
