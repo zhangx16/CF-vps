@@ -75,11 +75,11 @@ CPU 达到 85% 或每核负载达到 0.9 时逐步降低并发；CPU 低于 65%�
 | --- | --- | --- |
 | DMIT | AS906 / AS132110 / AS32519 | RIPEstat ASN 公告，附内置快照 |
 | BWH / 搬瓦工（IT7） | AS25820 主网 | RIPEstat ASN 公告 |
-| GoMami · 香港 | AS36002 中可确认的香港 IPv4 | [GoMami 官方 Geofeed](https://gomami.io/geofeed.txt) ∩ ASN 公告 |
-| VMISS · 美国 | AS400464 / AS967 中可确认的美国 IPv4 | [Cogent 官方 Geofeed](https://geofeed.cogentco.com/geofeed.csv) ∩ VMISS ASN 公告 |
-| ISIF Cloud · 香港 | AS209554 / AS154162 中可确认的香港 IPv4 | [ISIF 官方 Geofeed](https://isif.net/geofeed.csv) ∩ ASN 公告 |
+| GoMami · 全部地区 | AS36002 全部公网 IPv4 公告 | RIPEstat ASN 公告 |
+| VMISS · 全部地区 | AS400464 / AS967 全部公网 IPv4 公告 | RIPEstat ASN 公告 |
+| ISIF Cloud · 全部地区 | AS209554 / AS154162 全部公网 IPv4 公告 | RIPEstat ASN 公告 |
 
-其他旧预设及其网段缓存移除；既有任务及结果保留，暂停任务仍按保存的目标快照续扫。地区限定按 Geofeed 最具体网段标注处理：更具体的其他地区记录会覆盖宽泛标注；同等具体程度的冲突和未标注空间排除。GeoFeed 失败、格式错误或没有指定地区交集时，保留上次有效缓存，绝不回退成扫描整个 ASN。界面地区来自运营方/上游的公开标注，不是对物理位置的独立测量；与结果页 CF Trace 出口地区是两个不同概念。
+以上三个服务商不再按香港或美国筛选。升级后旧的地区限定缓存不会被当作全量数据，需刷新获取完整公告；历史任务、结果、收藏及暂停任务的目标快照保持原样。全部网段指所列 ASN 当前公告的公网 IPv4，可能不含其他 ASN 代播、租用或未公告地址。更新失败保留上次有效的同范围缓存。结果页仍可按 CF Trace 出口地区分类查看。
 
 BWH 预设采用 IT7 官方公布的 AS25820 主网公告，不保证覆盖所有机房、线路及租用地址；依据 [BWH 官方公司说明](https://bandwagonhost.com/news?id=238) 与 [IT7 官方网络信息](https://www.it7.net/)。其他服务商仍可输入名称和最多 5 个 ASN 自定义添加。
 

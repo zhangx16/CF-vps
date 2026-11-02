@@ -105,7 +105,8 @@ class RegionalProviderTests(unittest.TestCase):
     def test_only_requested_five_presets_are_available(self):
         from providers import PRESETS
         self.assertEqual({p['id'] for p in PRESETS},{'dmit','bwh','gomami_hk','vmiss_us','isif_hk'})
-        self.assertEqual({p['id']:p.get('country') for p in PRESETS if p.get('country')},{'gomami_hk':'HK','vmiss_us':'US','isif_hk':'HK'})
+        self.assertFalse(any(p.get('country') for p in PRESETS))
+        self.assertEqual(sum(p.get('scope')=='all_announced' for p in PRESETS),3)
 
     def test_longest_geofeed_prefix_overrides_broad_country(self):
         from providers import regional_prefixes
@@ -129,21 +130,25 @@ class RegionalProviderTests(unittest.TestCase):
             self.assertNotIn('vultr',json.loads(path.read_text())['cache'])
             self.assertEqual(reloaded.get('bwh')['networks'],['8.8.8.0/24'])
 
-    def test_regional_refresh_and_cache_scope_validation(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store=ProviderStore(Path(tmp)/'providers.json')
-            store.state['cache']['gomami_hk']=dict(networks=['1.1.1.0/24'],source='unscoped ASN cache')
-            with self.assertRaises(ValueError):store.resolve('gomami_hk')
-            with patch('providers.fetch_prefixes',return_value=['8.8.8.0/24','1.1.1.0/24']),patch('providers.fetch_geofeed',return_value='8.8.8.0/24,HK,,,\n1.1.1.0/24,JP,,,\n'):
-                store.refresh('gomami_hk')
-                for _ in range(200):
-                    if not store.get('gomami_hk')['refreshing']:break
-                    time.sleep(.01)
-            self.assertEqual(store.resolve('gomami_hk')[1],['8.8.8.0/24'])
-            with patch('providers.fetch_prefixes',return_value=['8.8.8.0/24']),patch('providers.fetch_geofeed',side_effect=ValueError('geofeed offline')):
-                store.refresh('gomami_hk')
-                for _ in range(200):
-                    if not store.get('gomami_hk')['refreshing']:break
-                    time.sleep(.01)
-            self.assertEqual(store.resolve('gomami_hk')[1],['8.8.8.0/24'])
-            self.assertIn('geofeed offline',store.get('gomami_hk')['error'])
+    def test_all_region_refresh_rejects_old_regional_cache(self):
+        from providers import PRESETS, fetch_profile
+        for profile in PRESETS[2:]:
+            with self.subTest(provider=profile['id']),tempfile.TemporaryDirectory() as tmp:
+                store=ProviderStore(Path(tmp)/'providers.json')
+                key=profile['id']
+                store.state['cache'][key]=dict(networks=['1.1.1.0/24'],country='HK',asns=profile['asns'])
+                with self.assertRaises(ValueError):store.resolve(key)
+                with patch('providers.fetch_prefixes',return_value=['8.8.8.0/24','1.1.1.0/24']),patch('providers.fetch_geofeed',side_effect=AssertionError('all-region profiles must not use geofeed')):
+                    store.refresh(key)
+                    for _ in range(200):
+                        if not store.get(key)['refreshing']:break
+                        time.sleep(.01)
+                self.assertEqual(store.resolve(key)[1],['8.8.8.0/24','1.1.1.0/24'])
+                self.assertEqual(ProviderStore(store.path).resolve(key)[1],['8.8.8.0/24','1.1.1.0/24'])
+                with patch('providers.fetch_prefixes',side_effect=ValueError('upstream offline')):
+                    store.refresh(key)
+                    for _ in range(200):
+                        if not store.get(key)['refreshing']:break
+                        time.sleep(.01)
+                self.assertEqual(len(store.resolve(key)[1]),2)
+                self.assertIn('upstream offline',store.get(key)['error'])

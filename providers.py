@@ -15,12 +15,13 @@ import uuid
 PRESETS=[
     dict(id='dmit',name='DMIT',asns=[906,132110,32519]),
     dict(id='bwh',name='BWH / 搬瓦工（IT7）',asns=[25820],notes='IT7 主网 ASN 公告，不保证覆盖所有机房、线路及租用网段。',reference='https://www.it7.net/'),
-    dict(id='gomami_hk',name='GoMami · 香港',asns=[36002],country='HK',geofeed='https://gomami.io/geofeed.txt',
-         notes='仅取 GoMami 官方 Geofeed 标注香港、且仍由 AS36002 公告的 IPv4；未标注地区的地址不纳入。',reference='https://docs.gomami.io/en/network/locations/'),
-    dict(id='vmiss_us',name='VMISS · 美国',asns=[400464,967],country='US',geofeed='https://geofeed.cogentco.com/geofeed.csv',
-         notes='仅取 VMISS ASN 公告与 Cogent 官方 Geofeed 美国标注的交集；不将整个 ASN 或注册地视为美国机房。',reference='https://www.vmiss.com/'),
-    dict(id='isif_hk',name='ISIF Cloud · 香港',asns=[209554,154162],country='HK',geofeed='https://isif.net/geofeed.csv',
-         notes='仅取 ISIF 官方 Geofeed 标注香港、且仍由所列 ASN 公告的 IPv4；日本、新加坡和美国网段排除。',reference='https://cloud.isif.net/'),
+    # Keep existing IDs so saved task provenance and bookmarks remain stable.
+    dict(id='gomami_hk',name='GoMami · 全部地区',asns=[36002],scope='all_announced',
+         notes='AS36002 当前公告的全部公网 IPv4，不限制地区；可能不包含由其他 ASN 公告的租用网段。',reference='https://docs.gomami.io/en/network/locations/'),
+    dict(id='vmiss_us',name='VMISS · 全部地区',asns=[400464,967],scope='all_announced',
+         notes='AS400464 / AS967 当前公告的全部公网 IPv4，不限制地区；可能不包含由其他 ASN 公告的租用网段。',reference='https://www.vmiss.com/'),
+    dict(id='isif_hk',name='ISIF Cloud · 全部地区',asns=[209554,154162],scope='all_announced',
+         notes='AS209554 / AS154162 当前公告的全部公网 IPv4，不限制地区；可能不包含由其他 ASN 公告的租用网段。',reference='https://cloud.isif.net/'),
 ]
 
 MAX_BYTES=8*1024*1024
@@ -158,6 +159,8 @@ class ProviderStore:
         key=profile['id'];cache=self.state['cache'].get(key,{})
         if profile.get('country') and (cache.get('country')!=profile['country'] or cache.get('geofeed')!=profile['geofeed'] or cache.get('asns')!=profile['asns']):
             cache={}
+        if profile.get('scope')=='all_announced' and (cache.get('scope')!='all_announced' or cache.get('asns')!=profile['asns'] or cache.get('country')):
+            cache={}
         networks=cache.get('networks',[])
         result=dict(profile,updated_at=cache.get('updated_at'),source=cache.get('source','尚未更新'),
                     prefix_count=len(networks),ip_count=address_count(networks),refreshing=key in self.busy,error=self.errors.get(key,''))
@@ -196,7 +199,7 @@ class ProviderStore:
                 networks=fetch_profile(profile)
                 with self.lock:
                     previous=self.state['cache'].get(key)
-                    self.state['cache'][key]=dict(networks=networks,updated_at=time.time(),source=('RIPEstat 公告 ∩ '+profile['country']+' Geofeed') if profile.get('country') else 'RIPEstat ASN 公告前缀',country=profile.get('country'),geofeed=profile.get('geofeed'),asns=profile['asns'])
+                    self.state['cache'][key]=dict(networks=networks,updated_at=time.time(),source=('RIPEstat 公告 ∩ '+profile['country']+' Geofeed') if profile.get('country') else 'RIPEstat ASN 公告前缀',scope=profile.get('scope'),country=profile.get('country'),geofeed=profile.get('geofeed'),asns=profile['asns'])
                     try:self.save()
                     except BaseException:
                         if previous is None:self.state['cache'].pop(key,None)
