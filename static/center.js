@@ -1,25 +1,41 @@
-/* Dedicated cross-task result catalog; scanning continues in the background. */
-(()=>{const get=id=>document.getElementById(id);let last=0,loading=false;const center=window.resultCenter={active:false,favorites:false,jobs:[],pendingJob:'',pendingRegion:'',
+/* Task-first result navigation; scanning continues in the background. */
+(()=>{const get=id=>document.getElementById(id);let last=0,loading=false,navSignature='';const center=window.resultCenter={active:false,favorites:false,jobs:[],pendingJob:'',pendingRegion:'',
  async refreshMeta(){
   if(loading||Date.now()-last<5000&&!center.pendingJob)return;loading=true;
-  try{const [catalog,facets]=await Promise.all([api('/api/catalog'),api('/api/facets?id=*&view=hits')]);center.jobs=catalog.jobs;
+  try{const catalog=await api('/api/catalog');center.jobs=catalog.jobs;
    const provider=get('catalog-provider').value,job=center.pendingJob||get('catalog-job').value;
    get('catalog-provider').replaceChildren();const all=document.createElement('option');all.value='';all.textContent='全部服务商';get('catalog-provider').append(all);
-   get('center-provider-nav').replaceChildren();for(const p of catalog.providers){const option=document.createElement('option');option.value=p.id;option.textContent=`${p.name} · ${p.records.toLocaleString()} 条`;get('catalog-provider').append(option);navButton(get('center-provider-nav'),p.name,p.hits,()=>center.activate({provider:p.id}));}
+   for(const p of catalog.providers){const option=document.createElement('option');option.value=p.id;option.textContent=`${p.name} · ${p.records.toLocaleString()} 条`;get('catalog-provider').append(option);}
    if([...get('catalog-provider').options].some(o=>o.value===provider))get('catalog-provider').value=provider;
-   fillJobs(job);center.pendingJob='';get('center-region-nav').replaceChildren();for(const r of facets.regions)navButton(get('center-region-nav'),regionName(r.value),r.count,()=>center.activate({region:r.value}));
-   last=Date.now();
+   fillJobs(job);center.pendingJob='';renderTaskNav();updateContext();last=Date.now();
   }catch(e){message(e);}finally{loading=false;}
  },
- activate({provider='',region='',view='hits',favorites=false}={}){
-  center.active=true;center.favorites=favorites;center.pendingRegion=region;document.body.classList.add('center-mode');get('catalog-context').hidden=false;get('results-title').textContent=favorites?'收藏夹':'结果中心';get('results-hint').textContent=favorites?'收藏 IP 的历史探测记录；星标可取消收藏，同一 IP 各端口共用收藏状态。':'跨任务分类查看与查找；点击星标收藏，点击 IP:端口复制纯 IP。';get('catalog-provider').value=provider;fillJobs('*');get('view').value=view;get('region').value=region;get('colo').value='';checked.clear();resetPage();selectionState();refresh();get('results').scrollIntoView({behavior:'instant'});if(innerWidth<768){document.body.classList.remove('nav-open');get('nav-backdrop').hidden=true;get('nav-toggle').setAttribute('aria-expanded','false');}
+ activate({job='*',view='all',favorites=false}={}){
+  center.active=true;center.favorites=favorites;center.pendingRegion='';document.body.classList.add('center-mode');get('catalog-context').hidden=false;get('catalog-provider').value='';fillJobs(job);get('view').value=view;get('region').value='';get('colo').value='';get('search').value='';checked.clear();resetPage();updateContext();selectionState();refresh();get('results').scrollIntoView({behavior:'instant'});if(innerWidth<768){document.body.classList.remove('nav-open');get('nav-backdrop').hidden=true;get('nav-toggle').setAttribute('aria-expanded','false');}
  },
- exit(){center.active=false;center.favorites=false;center.pendingRegion='';document.body.classList.remove('center-mode','center-all');get('catalog-context').hidden=true;get('results-title').textContent='探测记录';get('results-hint').textContent='点击 IP:端口复制纯 IP。地区为 CF 观察到的出口地区。';get('region').value='';get('colo').value='';checked.clear();resetPage();refresh();}
+ exit(){center.active=false;center.favorites=false;center.pendingRegion='';document.body.classList.remove('center-mode','center-all');get('catalog-context').hidden=true;get('results-title').textContent='探测记录';get('results-hint').textContent='点击 IP:端口复制纯 IP。地区为 CF 观察到的出口地区。';get('region').value='';get('colo').value='';checked.clear();resetPage();updateContext();refresh();}
 };
-function navButton(parent,label,count,click){const button=document.createElement('button');button.className='nav-item category-button';const text=document.createElement('span');text.textContent=label;text.title=label;const badge=document.createElement('span');badge.className='category-count';badge.textContent=count.toLocaleString();button.append(text,badge);button.onclick=click;parent.append(button);}
-function fillJobs(value){get('catalog-job').replaceChildren();const all=document.createElement('option');all.value='*';all.textContent='全部历史任务';get('catalog-job').append(all);for(const j of center.jobs){if(get('catalog-provider').value&&j.provider!==get('catalog-provider').value)continue;const o=document.createElement('option');o.value=j.id;o.textContent=`${j.task_name?j.task_name+' · ':''}${timestamp(j.created)} · ${j.provider_name} · ${labels[j.status]}`;get('catalog-job').append(o);}if([...get('catalog-job').options].some(o=>o.value===value))get('catalog-job').value=value;}
-get('center-favorites-nav').onclick=()=>center.activate({view:'all',favorites:true});
-get('center-all-nav').onclick=()=>center.activate({view:'all'});get('center-verified-nav').onclick=()=>center.activate({view:'verified'});
-get('catalog-provider').onchange=()=>{fillJobs('*');get('region').value='';get('colo').value='';checked.clear();resetPage();refresh();};get('catalog-job').onchange=()=>{checked.clear();resetPage();refresh();};
+function taskName(j){return j.task_name||j.provider_name||'自定义目标';}
+function renderTaskNav(){
+ const signature=JSON.stringify(center.jobs.map(j=>[j.id,j.task_name,j.provider_name,j.status,j.done,j.hits]));
+ get('result-task-count').textContent=center.jobs.length.toLocaleString();
+ if(signature===navSignature)return;navSignature=signature;
+ const parent=get('center-task-nav');parent.replaceChildren();
+ for(const j of center.jobs){const button=document.createElement('button');button.type='button';button.className='nav-item task-result-button';button.dataset.job=j.id;button.title=`${taskName(j)} · ${timestamp(j.created)} · ${j.id}`;
+ const name=document.createElement('span');name.className='task-result-name';name.textContent=taskName(j);
+ const meta=document.createElement('span');meta.className='task-result-meta';meta.textContent=`${timestamp(j.created)} · ${labels[j.status]||j.status}`;
+ const count=document.createElement('span');count.className='task-result-meta';count.textContent=`已测 ${j.done.toLocaleString()} · 命中 ${j.hits.toLocaleString()}`;
+ button.append(name,meta,count);button.onclick=()=>center.activate({job:j.id});parent.append(button);}
+ if(!center.jobs.length){const empty=document.createElement('p');empty.className='hint task-nav-empty';empty.textContent='暂无测试，新建扫描后会显示在这里。';parent.append(empty);}
+}
+function updateContext(){
+ const id=get('catalog-job').value||'*',job=center.jobs.find(j=>j.id===id);
+ if(center.active){get('results-title').textContent=center.favorites?'收藏夹':job?taskName(job):'全部测试结果';get('results-hint').textContent=center.favorites?'收藏 IP 的探测记录；点击星标取消收藏。':job?`${timestamp(job.created)} · ${job.provider_name} · ${labels[job.status]||job.status} · 已测 ${job.done.toLocaleString()} · 命中 ${job.hits.toLocaleString()}。点击 IP:端口复制 IP。`:'汇总所有测试记录；选择左侧某次测试可单独查看结果。';}
+ for(const b of get('center-task-nav').querySelectorAll('button')){const active=center.active&&!center.favorites&&b.dataset.job===id;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');}
+ get('center-all-nav').classList.toggle('active',center.active&&!center.favorites&&id==='*');get('center-favorites-nav').classList.toggle('active',center.active&&center.favorites);
+}
+function fillJobs(value){get('catalog-job').replaceChildren();const all=document.createElement('option');all.value='*';all.textContent='全部测试';get('catalog-job').append(all);for(const j of center.jobs){if(get('catalog-provider').value&&j.provider!==get('catalog-provider').value)continue;const o=document.createElement('option');o.value=j.id;o.textContent=`${taskName(j)} · ${timestamp(j.created)} · ${labels[j.status]}`;get('catalog-job').append(o);}if([...get('catalog-job').options].some(o=>o.value===value))get('catalog-job').value=value;}
+get('center-favorites-nav').onclick=()=>center.activate({favorites:true});get('center-all-nav').onclick=()=>center.activate();
+get('catalog-provider').onchange=()=>{fillJobs('*');get('region').value='';get('colo').value='';checked.clear();resetPage();updateContext();refresh();};get('catalog-job').onchange=()=>{get('region').value='';get('colo').value='';checked.clear();resetPage();updateContext();refresh();};
 center.refreshMeta();
 })();
