@@ -121,6 +121,7 @@ class Manager:
         with connect(self.path) as db:
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
+                CREATE TABLE IF NOT EXISTS favorites (ip TEXT PRIMARY KEY, created REAL);
                 CREATE TABLE IF NOT EXISTS jobs (
                   id TEXT PRIMARY KEY, created REAL, updated REAL, status TEXT,
                   config TEXT, total INTEGER, done INTEGER DEFAULT 0,
@@ -198,7 +199,22 @@ class Manager:
             group['records']+=job['done'];group['hits']+=job['hits'];group['jobs']+=1
         return dict(jobs=jobs,providers=list(groups.values()))
 
-    def selection_condition(self,ident,view='hits',region='',colo='',search='',provider=''):
+    def favorite(self, ip, enabled):
+        try:
+            address = ipaddress.ip_address(ip)
+        except (ValueError, TypeError):
+            raise ValueError('IP 无效')
+        if address.version != 4 or not address.is_global or not isinstance(enabled, bool):
+            raise ValueError('需要公网 IPv4 和布尔收藏状态')
+        ip = str(address)
+        with connect(self.path) as db:
+            if enabled:
+                db.execute('INSERT OR IGNORE INTO favorites(ip,created) VALUES (?,?)',(ip,time.time()))
+            else:
+                db.execute('DELETE FROM favorites WHERE ip=?',(ip,))
+        return dict(ip=ip,favorite=enabled)
+
+    def selection_condition(self,ident,view='hits',region='',colo='',search='',provider='',favorites=False):
         condition,args=self.condition(ident,view,region,colo,search)
         sources=self.job_sources()
         if provider:
@@ -207,6 +223,8 @@ class Manager:
             condition=scope+condition[len('job=?'):];args=ids+args[1:]
         elif ident=='*':
             condition='1=1'+condition[len('job=?'):];args=args[1:]
+        if favorites:
+            condition += ' AND ip IN (SELECT ip FROM favorites)'
         return condition,args,sources
 
     def start(self, raw=None, resume=None, retest=None):
@@ -394,14 +412,14 @@ class Manager:
             args.extend([search.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%',search])
         return ' AND '.join(parts), args
 
-    def facets(self, ident, view='hits',provider=''):
-        condition, args, _ = self.selection_condition(ident,view,provider=provider)
+    def facets(self, ident, view='hits',provider='',favorites=False):
+        condition, args, _ = self.selection_condition(ident,view,provider=provider,favorites=favorites)
         with connect(self.path) as db:
             regions = [dict(r) for r in db.execute(f"SELECT COALESCE(NULLIF(loc,''),'UNKNOWN') AS value,COUNT(*) AS count FROM results WHERE {condition} GROUP BY value ORDER BY count DESC",args)]
             colos = [dict(r) for r in db.execute(f"SELECT colo AS value,COUNT(*) AS count FROM results WHERE {condition} AND colo!='' GROUP BY colo ORDER BY count DESC",args)]
         return dict(regions=regions,colos=colos)
 
-    def results(self, ident, view='hits', page=1, limit=100, region='', colo='', search='', sort='newest', cursor='',provider=''):
+    def results(self, ident, view='hits', page=1, limit=100, region='', colo='', search='', sort='newest', cursor='',provider='',favorites=False):
         page = max(1,min(int(page),100000))
         limit = max(1,min(int(limit),200))
         choices = {'newest':('rowid','DESC'),'latency_asc':('COALESCE(latency,1e30)','ASC'),
@@ -410,7 +428,7 @@ class Manager:
         if sort not in choices:
             raise ValueError('排序无效')
         key, direction = choices[sort]
-        condition, args, sources = self.selection_condition(ident,view,region,colo,search,provider)
+        condition, args, sources = self.selection_condition(ident,view,region,colo,search,provider,favorites)
         with connect(self.path) as db:
             total = db.execute(f'SELECT COUNT(*) FROM results WHERE {condition}',args).fetchone()[0]
             where, values = condition, list(args)
@@ -434,6 +452,7 @@ class Manager:
                 data = json.loads(row['data'])
                 history = db.execute('SELECT MIN(CASE WHEN hit=1 THEN observed END) AS first_seen,MAX(CASE WHEN confirmed=1 THEN observed END) AS last_confirmed,COUNT(*) AS checks,COALESCE(SUM(hit),0) AS successes,COALESCE(SUM(confirmed),0) AS confirmations FROM observations WHERE ip=? AND port=?',(data['ip'],data['port'])).fetchone()
                 data['history'] = dict(history)
+                data['favorite'] = db.execute('SELECT 1 FROM favorites WHERE ip=?',(data['ip'],)).fetchone() is not None
                 source=sources.get(row['job'],{})
                 data.update(job_id=row['job'],provider_name=source.get('provider_name','未知来源'),job_created=source.get('created'))
                 items.append(data)

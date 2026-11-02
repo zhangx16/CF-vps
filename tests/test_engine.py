@@ -61,6 +61,30 @@ class EngineTests(unittest.TestCase):
         self.assertEqual((job['status'],job['done'],job['hits']), ('completed',2,1))
         self.assertEqual(self.manager.results(ident, 'verified')['total'], 1)
 
+    def test_favorites_across_ports_tasks_and_restart(self):
+        async def hit(ip, port, timeout, sem, **kwargs):
+            return dict(ip=ip,port=port,status='hit',verified='1',evidence='dual_verified',latency_ms=2)
+        ids=[]
+        with patch('engine.probe',hit):
+            for _ in range(2):
+                ids.append(self.manager.start({'targets':'8.8.8.8','ports':'443,8443'}))
+                self.wait()
+        self.manager.favorite('8.8.8.8',True)
+        self.manager.favorite('8.8.8.8',True)
+        self.manager=Manager(self.manager.path)
+        rows=self.manager.results('*','all',favorites=True)
+        self.assertEqual(rows['total'],4)
+        self.assertTrue(all(r['favorite'] for r in rows['items']))
+        self.assertEqual(sum(r['count'] for r in self.manager.facets('*','all',favorites=True)['regions']),4)
+        self.manager.delete(ids[0])
+        self.assertEqual(self.manager.results('*','all',favorites=True)['total'],2)
+        self.manager.favorite('8.8.8.8',False)
+        self.assertEqual(self.manager.results('*','all',favorites=True)['total'],0)
+        self.assertTrue(all(not r['favorite'] for r in self.manager.results('*','all')['items']))
+        for ip,enabled in [('127.0.0.1',True),('invalid',True),('8.8.8.8','true')]:
+            with self.assertRaises(ValueError):
+                self.manager.favorite(ip,enabled)
+
     def test_failure_is_visible(self):
         async def fail(*args, **kwargs):
             raise RuntimeError('simulated failure')

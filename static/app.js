@@ -73,7 +73,14 @@ async function copyIP(ip) {
   } catch(e) { message(e); }
 }
 function ipButton(ip,port) { const b=document.createElement('button');b.className='copy-ip';b.type='button';b.textContent=`${ip}:${port}`;b.title=`复制 IP：${ip}`;b.onclick=()=>copyIP(ip);return b; }
-function filterQuery() { return new URLSearchParams({id:resultId(),provider:resultProvider(),view:$('view').value,region:$('region').value,colo:$('colo').value,search:$('search').value.trim(),sort:$('sort').value,cursor}); }
+function favoriteButton(r) {
+  const b=document.createElement('button');b.type='button';b.className='favorite-ip';
+  b.textContent=r.favorite?'★':'☆';b.setAttribute('aria-pressed',String(Boolean(r.favorite)));
+  b.title=`${r.favorite?'取消收藏':'收藏'} ${r.ip}`;b.setAttribute('aria-label',b.title);
+  b.onclick=async()=>{b.disabled=true;try{await api('/api/favorite',{ip:r.ip,enabled:!r.favorite});epoch++;await renderResults();}catch(e){message(e);}finally{b.disabled=false;}};
+  return b;
+}
+function filterQuery() { return new URLSearchParams({id:resultId(),provider:resultProvider(),favorites:window.resultCenter?.favorites?'1':'',view:$('view').value,region:$('region').value,colo:$('colo').value,search:$('search').value.trim(),sort:$('sort').value,cursor}); }
 async function renderResults() {
   if(!resultId())return;
   const current=resultId(), version=epoch;
@@ -84,7 +91,7 @@ async function renderResults() {
   for(const r of visible) {
     const tr=document.createElement('tr'),tick=document.createElement('input');tick.type='checkbox';tick.setAttribute('aria-label',`选择 ${r.ip}:${r.port}`);const key=`${r.ip}:${r.port}`;tick.checked=checked.has(key);
     tick.onchange=()=>{if(tick.checked)checked.set(key,{ip:r.ip,port:r.port});else checked.delete(key);selectionState();};
-    let td=document.createElement('td');td.append(tick);tr.append(td);td=document.createElement('td');td.append(ipButton(r.ip,r.port));tr.append(td);td=document.createElement('td');td.className='catalog-column';td.textContent=r.provider_name||'未知来源';tr.append(td);
+    let td=document.createElement('td');td.append(tick);tr.append(td);td=document.createElement('td');td.append(favoriteButton(r),ipButton(r.ip,r.port));tr.append(td);td=document.createElement('td');td.className='catalog-column';td.textContent=r.provider_name||'未知来源';tr.append(td);
     const h=r.history||{},ms=r.request_ms??r.latency_ms;
     const values=[levels[r.evidence]||labels[r.status]||r.status,verifications[r.verification]||(r.verified==='1'?'旧版确认':'—'),ms===''||ms==null?'—':`${ms} ms`,r.colo||'—',regionName(r.loc),timestamp(h.first_seen),timestamp(h.last_confirmed),h.checks?`${(h.successes/h.checks*100).toFixed(0)}% (${h.successes}/${h.checks})`:'—',errors[r.error_kind]||errors[r.verify_error]||r.err||r.server||'—'];
     for(const value of values){const cell=document.createElement('td');cell.textContent=value;tr.append(cell);}
@@ -101,7 +108,7 @@ async function refresh() {
   try {
     records=await api('/api/jobs');renderJobs();
     if(window.resultCenter)await window.resultCenter.refreshMeta();
-    if(resultId()) { const id=resultId(),view=$('view').value,provider=resultProvider();const facets=await api('/api/facets?'+new URLSearchParams({id,view,provider}));
+    if(resultId()) { const id=resultId(),view=$('view').value,provider=resultProvider();const facets=await api('/api/facets?'+new URLSearchParams({id,view,provider,favorites:window.resultCenter?.favorites?'1':''}));
       if(id===resultId()&&view===$('view').value){options($('region'),facets.regions,'全部地区',regionName);options($('colo'),facets.colos,'全部机房');if(window.resultCenter?.pendingRegion){$('region').value=window.resultCenter.pendingRegion;window.resultCenter.pendingRegion='';}} }
     await renderResults();
   } catch(e){message(e);}finally{polling=false;}
