@@ -14,13 +14,15 @@ from unittest.mock import patch
 from engine import Manager
 from scan_dmit_cf_fallback import probe_once
 from server import make_handler
+from providers import ProviderStore
 
 
 class DashboardTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.manager = Manager(Path(self.tmp.name) / 'scan.db')
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(self.manager, 'test-password-12345678'))
+        self.providers=ProviderStore(Path(self.tmp.name)/'providers.json')
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(self.manager, 'test-password-12345678',self.providers))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -76,6 +78,25 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('attachment', headers['Content-Disposition'])
         self.assertIn(b"'=FORMULA()", body)
         self.assertEqual(self.request('GET', '/api/export?id=missing')[0], 404)
+
+    def test_provider_selection_and_adaptive_settings(self):
+        self.assertEqual(len(json.loads(self.request('GET','/api/providers')[2])),6)
+        self.assertEqual(self.request('POST','/api/start',{'provider':'vultr'})[0],400)
+        self.assertEqual(len(self.manager.jobs()),0)
+        self.providers.state['cache']['vultr']=dict(networks=['8.8.8.0/30'],updated_at=123,source='fixture')
+        calls=[]
+        async def fake(ip,port,*args,**kwargs):
+            calls.append(ip)
+            return dict(ip=ip,port=port,status='open_not_cf',request_ms=1)
+        with patch('engine.probe',fake):
+            status,_,body=self.request('POST','/api/start',{'provider':'vultr','prefixes':['8.8.8.0/30'],'targets':'1.1.1.1','ports':'443','adaptive':False,'concurrency':3})
+            self.assertEqual(status,200)
+            self.manager.thread.join(5)
+        job=self.manager.jobs()[0]
+        self.assertEqual(job['config']['provider_name'],'Vultr')
+        self.assertEqual(job['config']['provider_asns'],[20473])
+        self.assertFalse(job['config']['adaptive'])
+        self.assertEqual(set(calls),{'8.8.8.1','8.8.8.2'})
 
 
 class ProbeTests(unittest.IsolatedAsyncioTestCase):

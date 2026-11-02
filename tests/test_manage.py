@@ -187,3 +187,18 @@ class ManagementTests(unittest.TestCase):
         with patch.object(manage,'run') as run:
             with self.assertRaises(ValueError):manage.configure_domain('bad.example.com;touch /tmp/test')
         run.assert_not_called()
+
+
+    def test_provider_cache_is_backed_up_and_restored(self):
+        import json
+        cached={'version':1,'custom':[],'cache':{'vultr':{'networks':['8.8.8.0/30'],'updated_at':123,'source':'fixture'}}}
+        provider=self.data/'providers.json'
+        provider.write_text(json.dumps(cached))
+        archive=manage.backup(quiet=True)
+        self.db.close()
+        provider.write_text(json.dumps({'version':1,'custom':[],'cache':{}}))
+        account=types.SimpleNamespace(pw_uid=os.getuid(),pw_gid=os.getgid())
+        with patch('builtins.input',return_value='RESTORE'),patch.object(manage,'run'),patch.object(manage,'active',return_value=False),patch.object(manage.pwd,'getpwnam',return_value=account):
+            manage.restore(archive)
+        self.assertEqual(json.loads(provider.read_text()),cached)
+        self.assertEqual(provider.stat().st_mode&0o777,0o600)

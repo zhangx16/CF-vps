@@ -139,6 +139,8 @@ def backup(quiet=False):
                 with closing(sqlite3.connect(source, timeout=30)) as src, closing(sqlite3.connect(tmp / 'scan.db')) as dest:
                     src.backup(dest, pages=256, sleep=0.1)
             shutil.copyfile(CONFIG, tmp / 'cf-vps.env')
+            if (data_dir()/'providers.json').exists():
+                shutil.copyfile(data_dir()/'providers.json',tmp/'providers.json')
             (tmp / 'manifest.json').write_text(json.dumps({'format': 1, 'created': stamp}))
             with tarfile.open(output, 'w:gz') as archive:
                 for path in tmp.iterdir():
@@ -229,14 +231,14 @@ def restore(path, confirmed=False, safety_backup=True):
         tmp = Path(tmp)
         # Read only named regular files; never extract arbitrary archive paths or links.
         with tarfile.open(path, 'r:gz') as archive:
-            for name in ('manifest.json', 'cf-vps.env', 'scan.db'):
+            for name in ('manifest.json', 'cf-vps.env', 'scan.db','providers.json'):
                 try:
                     member = archive.getmember(name)
                 except KeyError:
-                    if name == 'scan.db':
+                    if name in ('scan.db','providers.json'):
                         continue
                     raise ValueError('不是有效的 CF VPS 备份')
-                if not member.isfile() or (name != 'scan.db' and member.size > 65536):
+                if not member.isfile() or (name not in ('scan.db','providers.json') and member.size > 65536) or (name=='providers.json' and member.size>8*1024*1024):
                     raise ValueError('备份格式无效')
                 with archive.extractfile(member) as src, (tmp / name).open('wb') as dest:
                     shutil.copyfileobj(src, dest)
@@ -248,6 +250,11 @@ def restore(path, confirmed=False, safety_backup=True):
         ipaddress.ip_address(config.get('CFVPS_HOST', '0.0.0.0'))
         if not 1 <= int(config.get('CFVPS_PORT', '8787')) <= 65535:
             raise ValueError('备份端口无效')
+        provider_cache=tmp/'providers.json'
+        if provider_cache.exists():
+            cache=json.loads(provider_cache.read_text())
+            if not isinstance(cache,dict) or cache.get('version')!=1 or not isinstance(cache.get('custom'),list) or not isinstance(cache.get('cache'),dict):
+                raise ValueError('服务商缓存格式无效')
         source = tmp / 'scan.db'
         if source.exists():
             with closing(sqlite3.connect(source)) as db:
@@ -282,6 +289,14 @@ def restore(path, confirmed=False, safety_backup=True):
                     os.replace(temp_db, target / 'scan.db')
                 else:
                     (target / 'scan.db').unlink(missing_ok=True)
+                if provider_cache.exists():
+                    temp_cache=target/'.restore-providers.json'
+                    shutil.copyfile(provider_cache,temp_cache)
+                    os.chown(temp_cache,account.pw_uid,account.pw_gid)
+                    os.chmod(temp_cache,0o600)
+                    os.replace(temp_cache,target/'providers.json')
+                else:
+                    (target/'providers.json').unlink(missing_ok=True)
                 write_config(config)
         finally:
             if was_active:

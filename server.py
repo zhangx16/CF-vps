@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from engine import FIELDS, Manager, connect
+from providers import ProviderStore
 
 ROOT = Path(__file__).resolve().parent
 
@@ -71,7 +72,8 @@ class LoginGuard:
                 self.entries.popitem(last=False)
 
 
-def make_handler(manager, password):
+def make_handler(manager, password, providers=None):
+    providers = providers or ProviderStore(Path(manager.path).parent / "providers.json")
     expected = 'Basic ' + base64.b64encode(('admin:' + password).encode()).decode()
     guard = LoginGuard()
 
@@ -124,8 +126,8 @@ def make_handler(manager, password):
             parsed = urlsplit(self.path)
             query = parse_qs(parsed.query)
             try:
-                if parsed.path in ('/', '/app.js', '/style.css', '/fonts.css'):
-                    name, kind = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/fonts.css': ('fonts.css', 'text/css; charset=utf-8')}[parsed.path]
+                if parsed.path in ('/', '/app.js', '/style.css', '/fonts.css', '/providers.js'):
+                    name, kind = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/fonts.css': ('fonts.css', 'text/css; charset=utf-8'), '/providers.js': ('providers.js', 'text/javascript; charset=utf-8')}[parsed.path]
                     self.reply(200, (ROOT / 'static' / name).read_bytes(), kind)
                 elif parsed.path == '/api/jobs':
                     self.reply(200, manager.jobs())
@@ -133,6 +135,10 @@ def make_handler(manager, password):
                     self.reply(200, manager.results(query.get('id', [''])[0], query.get('view', ['hits'])[0],
                         region=query.get('region',[''])[0], colo=query.get('colo',[''])[0],
                         search=query.get('search',[''])[0], sort=query.get('sort',['newest'])[0], cursor=query.get('cursor',[''])[0]))
+                elif parsed.path == '/api/providers':
+                    self.reply(200,providers.list())
+                elif parsed.path == '/api/provider':
+                    self.reply(200,providers.get(query.get('id',[''])[0]))
                 elif parsed.path == '/api/facets':
                     self.reply(200, manager.facets(query.get('id',[''])[0], query.get('view',['hits'])[0]))
                 elif parsed.path == '/api/compare':
@@ -201,7 +207,16 @@ def make_handler(manager, password):
                     raise ValueError('需要 JSON 对象')
                 path = urlsplit(self.path).path
                 if path == '/api/start':
+                    if raw.get('provider'):
+                        provider,networks=providers.resolve(raw['provider'],raw.get('prefixes'))
+                        raw.update(targets='\n'.join(networks),provider_name=provider['name'],provider_asns=provider['asns'],provider_updated_at=provider['updated_at'])
                     self.reply(200, {'id': manager.start(raw)})
+                elif path == '/api/provider-refresh':
+                    providers.refresh(raw.get('id',''))
+                    self.reply(200,{'ok':True})
+                elif path == '/api/provider-add':
+                    profile=providers.add(raw.get('name',''),raw.get('asns',''))
+                    self.reply(200,profile)
                 elif path == '/api/resume':
                     ident = raw.get('id')
                     if not isinstance(ident, str) or not ident:

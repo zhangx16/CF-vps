@@ -66,3 +66,7 @@ A server scanning console whose main task is inspecting progress and filtering/r
 - Screenshot and audit widths: 375, 767, 768, 1200, 1201, 1440px. No page overflow. Normal state has no reported contrast failures at any reviewed width. Table is separately horizontally scrollable.
 - Keyboard: native form/dialog focus and Escape; mobile drawer Escape and focus loop; visible focus styles. Native clipboard is used on HTTPS; fallback for non-secure contexts.
 - Reference photos, revenue figures, customers, testimonials, graphs and avatars are intentionally absent. No external resource fetch is needed to render the UI.
+
+## Resource and provider additions
+
+The user subsequently requested adaptive concurrency and selectable provider prefix inventories. Runtime resource information is a secondary line in the existing task card, using the established text scale. Provider inventory is a disclosure/table module, reached from the existing sidebar, with no additional card grid. Its selectors, row checkboxes, pagination and custom ASN form reuse the same controls and tables. The scan dialog adds adaptive mode and normal minimum concurrency; the configured concurrency field is explicitly the ceiling. Anchors added: `providers`.

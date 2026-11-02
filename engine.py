@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from probing import probe
+from adaptive import AdaptiveLimiter
 
 ROOT = Path(__file__).resolve().parent
 FIELDS = ['ip', 'port', 'status', 'evidence', 'verification', 'server', 'cf_ray', 'colo', 'loc',
@@ -41,7 +42,8 @@ def prepare(raw):
     text = raw.get('targets', '')
     if not isinstance(text, str) or len(text.encode()) > 65536:
         raise ValueError('目标输入过长')
-    if not text.strip():
+    builtin = not text.strip()
+    if builtin:
         text = (ROOT / 'dmit_prefixes.txt').read_text()
     nets = []
     for line in text.replace(',', '\n').splitlines():
@@ -62,6 +64,10 @@ def prepare(raw):
     timeout = float(raw.get('timeout', 4))
     attempts = int(raw.get('attempts', 2))
     rps = float(raw.get('rps', 100))
+    adaptive = raw.get('adaptive', True)
+    if not isinstance(adaptive,bool):
+        raise ValueError('自适应并发必须是布尔值')
+    minimum = max(1,min(int(raw.get('min_concurrency',10)),concurrency))
     if not 1 <= concurrency <= 300 or not math.isfinite(timeout) or not 0.5 <= timeout <= 30 or not 1 <= attempts <= 3:
         raise ValueError('并发 1–300，超时 0.5–30 秒，尝试次数 1–3')
     if not math.isfinite(rps) or not 1 <= rps <= 1000:
@@ -70,7 +76,7 @@ def prepare(raw):
     if total > 2_000_000:
         raise ValueError('单次任务最多 200 万个 IP:端口，请拆分网段')
     return dict(networks=[str(n) for n in nets], ports=ports, concurrency=concurrency,
-                timeout=timeout, attempts=attempts, rps=rps, total=total, kind='scan')
+                timeout=timeout, attempts=attempts, rps=rps, total=total, kind='scan',adaptive=adaptive,min_concurrency=minimum,provider=raw.get('provider','dmit' if builtin else ''),provider_name=raw.get('provider_name','DMIT（内置快照）' if builtin else '自定义目标'),provider_asns=raw.get('provider_asns',[]),provider_updated_at=raw.get('provider_updated_at'))
 
 
 def targets(config):
@@ -108,6 +114,7 @@ class Manager:
         self.stop_event = threading.Event()
         self.active = None
         self.live = {}
+        self.controller = None
         with connect(self.path) as db:
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -154,6 +161,8 @@ class Manager:
                 row['config'] = json.loads(row['config'])
                 if row['id'] == self.active:
                     row.update(self.live)
+                    if self.controller:
+                        row.update(self.controller.snapshot())
                     if self.stop_event.is_set():
                         row['status'] = 'stopping'
         return rows
@@ -226,6 +235,7 @@ class Manager:
             with self.lock:
                 self.active = None
                 self.live = {}
+                self.controller = None
 
     async def _scan(self, ident, config, done, hits):
         db = open_db(self.path)
@@ -239,6 +249,10 @@ class Manager:
         limiter = RateLimiter(config.get('rps',100), self.stop_event.is_set)
         pending = 0
         finished = asyncio.Event()
+        controller = AdaptiveLimiter(config['concurrency'],config.get('min_concurrency',10),config.get('adaptive',True))
+        await controller.update()
+        with self.lock:
+            self.controller = controller
 
         def save():
             nonlocal pending
@@ -254,6 +268,13 @@ class Manager:
                 except asyncio.TimeoutError:
                     save()
 
+        async def resource_monitor():
+            while not finished.is_set():
+                try:
+                    await asyncio.wait_for(finished.wait(),5)
+                except asyncio.TimeoutError:
+                    await controller.update()
+
         async def worker():
             nonlocal done, hits, pending
             for ip, port in iterator:
@@ -262,9 +283,10 @@ class Manager:
                 if db.execute('SELECT 1 FROM results WHERE job=? AND ip=? AND port=?', (ident,ip,port)).fetchone():
                     continue
                 try:
-                    result = await probe(ip, port, config['timeout'], sem,
-                                         attempts=config.get('attempts',1), pace=limiter.wait,
-                                         stopping=self.stop_event.is_set)
+                    async with controller.slot(self.stop_event.is_set):
+                        result = await probe(ip, port, config['timeout'], sem,
+                                             attempts=config.get('attempts',1), pace=limiter.wait,
+                                             stopping=self.stop_event.is_set)
                 except asyncio.CancelledError:
                     if self.stop_event.is_set():
                         return  # Incomplete observations are deliberately not checkpointed.
@@ -290,6 +312,7 @@ class Manager:
                     save()
         tasks = [asyncio.create_task(worker()) for _ in range(config['concurrency'])]
         timer = asyncio.create_task(commit_timer())
+        resource_task = asyncio.create_task(resource_monitor())
         try:
             await asyncio.gather(*tasks)
             save()
@@ -305,7 +328,7 @@ class Manager:
         finally:
             finished.set()
             try:
-                await timer
+                await asyncio.gather(timer,resource_task)
             finally:
                 db.close()
 

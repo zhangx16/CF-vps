@@ -21,6 +21,7 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Python and installer syntax
         run: |
-          python -m py_compile server.py engine.py probing.py scan_dmit_cf_fallback.py manage.py
+          python -m py_compile server.py engine.py adaptive.py providers.py probing.py scan_dmit_cf_fallback.py manage.py
           bash -n install.sh
           node --check static/app.js
+          node --check static/providers.js
