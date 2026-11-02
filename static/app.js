@@ -1,10 +1,13 @@
 const $ = id => document.getElementById(id);
-const labels = {running:'扫描中',stopping:'正在停止',stopped:'已停止',completed:'已完成',interrupted:'服务中断 · 可续扫',failed:'失败 · 可续扫',hit:'命中',open_not_cf:'开放 / 非 CF',closed_or_error:'请求失败'};
+const labels = {running:'扫描中',stopping:'正在停止',stopped:'已暂停 · 可继续',completed:'已完成',interrupted:'服务中断 · 可续扫',failed:'失败 · 可续扫',hit:'命中',open_not_cf:'开放 / 非 CF',closed_or_error:'请求失败'};
 const levels = {none:'未命中',suspected:'疑似命中',trace_valid:'Trace 有效',dual_verified:'双域名确认',legacy:'旧版结果 · 待复测'};
 const verifications = {not_run:'未执行',error:'验证失败 · 可复测',confirmed:'已确认',not_confirmed:'未确认'};
 const errors = {connect_timeout:'连接超时',tls_timeout:'TLS 握手超时',http_timeout:'HTTP 读取超时',connection_refused:'连接拒绝',tls_error:'TLS 握手失败',http_error:'HTTP 响应错误',connect_error:'网络连接错误'};
 const regionNames = typeof Intl.DisplayNames === 'function' ? new Intl.DisplayNames(['zh-CN'],{type:'region'}) : null;
+let firstJobsRender=true;
 let selected='', page=1, records=[], busy=false, polling=false, cursor='', nextCursor='', previous=[], epoch=0, visible=[], checked=new Map();
+try{selected=localStorage.getItem('cfvps.selectedJob')||'';}catch{}
+function rememberJob(){if(selected)try{localStorage.setItem('cfvps.selectedJob',selected);}catch{}}
 function regionName(code) { if (!code || code==='UNKNOWN') return '未知地区'; try { return `${regionNames?.of(code)||code} (${code})`; } catch { return code; } }
 function resetPage() { page=1; cursor=''; nextCursor=''; previous=[]; epoch++; }
 function message(error) { const text=error ? error.message||error : ''; $('notice').textContent=text; if($('form-error'))$('form-error').textContent=text; }
@@ -34,13 +37,20 @@ function selectionState() {
   $('select-all').checked=visible.length>0&&visible.every(r=>checked.has(`${r.ip}:${r.port}`));
 }
 function renderJobs() {
+  const unfinished=records.find(j=>['running','stopping'].includes(j.status))||records.find(j=>j.id===selected&&['stopped','interrupted','failed'].includes(j.status))||records.filter(j=>['stopped','interrupted','failed'].includes(j.status)).sort((a,b)=>b.updated-a.updated)[0];
+  if(firstJobsRender&&records.length){if(unfinished)selected=unfinished.id;firstJobsRender=false;}
   if(!records.some(j=>j.id===selected)) { selected=records[0]?.id||'';resetPage();checked.clear(); }
   for(const id of ['jobs','compare-old','compare-new']) {
     const select=$(id), old=select.value; select.replaceChildren();
     for(const j of records) { const o=document.createElement('option');o.value=j.id;o.textContent=jobLabel(j);select.append(o); }
     if([...select.options].some(o=>o.value===old))select.value=old;
   }
-  $('jobs').value=selected;
+  $('jobs').value=selected;rememberJob();
+  const pending=records.find(j=>j.id===selected&&['stopped','interrupted','failed'].includes(j.status))||records.filter(j=>['stopped','interrupted','failed'].includes(j.status)).sort((a,b)=>b.updated-a.updated)[0];
+  const hasActive=records.some(j=>['running','stopping'].includes(j.status));
+  $('resume-notice').hidden=!pending||hasActive;
+  if(pending){$('resume-notice-detail').textContent=`${pending.config.provider_name||'目标快照'} · 已完成 ${pending.done.toLocaleString()} / ${pending.total.toLocaleString()} 次；保留原参数并跳过已完成目标。`;$('resume-last').dataset.id=pending.id;$('view-last').dataset.id=pending.id;}
+  $('resume-last').disabled=busy||hasActive;
   if(!$('compare-old').dataset.initialized&&records.length>=2) { $('compare-old').value=records[1].id;$('compare-new').value=records[0].id;$('compare-old').dataset.initialized='1'; }
   const j=records.find(j=>j.id===selected),active=records.some(j=>['running','stopping'].includes(j.status));
   $('start').disabled=active||busy;$('stop').disabled=!active||busy;$('resume').disabled=active||!j||j.status==='completed'||busy;
@@ -109,6 +119,9 @@ async function comparison() {
   }catch(e){message(e);}
 }
 $('scan-form').onsubmit=e=>{e.preventDefault();action('/api/start',{targets:$('targets').value,ports:$('ports').value,concurrency:Number($('concurrency').value),timeout:Number($('timeout').value),attempts:Number($('attempts').value),rps:Number($('rps').value),adaptive:$('adaptive').checked,min_concurrency:Number($('min-concurrency').value),...(window.providerSelection?.targets===$('targets').value?{provider:window.providerSelection.id,prefixes:window.providerSelection.prefixes}:{})});};
+function viewPending(id){if(window.resultCenter?.active)window.resultCenter.exit();selected=id;rememberJob();resetPage();checked.clear();renderJobs();refresh();$('overview').scrollIntoView();}
+$('resume-last').onclick=()=>{const id=$('resume-last').dataset.id;viewPending(id);action('/api/resume',{id});};
+$('view-last').onclick=()=>viewPending($('view-last').dataset.id);
 $('stop').onclick=()=>action('/api/stop',{});$('resume').onclick=()=>action('/api/resume',{id:selected});
 $('delete-job').onclick=()=>{if(confirm('删除此任务及其探测记录？此操作不能撤销。'))action('/api/delete',{id:selected});};
 $('retest-selected').onclick=()=>action('/api/retest',{id:resultId(),selected:[...checked.values()]});$('retest-all').onclick=()=>action('/api/retest',{id:resultId()});

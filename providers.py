@@ -1,5 +1,7 @@
 """Selectable provider ASN profiles with atomic, last-good prefix caches."""
 import ipaddress
+import csv
+import io
 import json
 import os
 from pathlib import Path
@@ -13,12 +15,14 @@ import uuid
 PRESETS=[
     dict(id='dmit',name='DMIT',asns=[906,132110,32519]),
     dict(id='bwh',name='BWH / 搬瓦工（IT7）',asns=[25820],notes='IT7 主网 ASN 公告，不保证覆盖所有机房、线路及租用网段。',reference='https://www.it7.net/'),
-    dict(id='vultr',name='Vultr',asns=[20473]),
-    dict(id='digitalocean',name='DigitalOcean',asns=[14061]),
-    dict(id='linode',name='Linode / Akamai',asns=[63949]),
-    dict(id='hetzner',name='Hetzner',asns=[24940]),
-    dict(id='ovh',name='OVHcloud',asns=[16276]),
+    dict(id='gomami_hk',name='GoMami · 香港',asns=[36002],country='HK',geofeed='https://gomami.io/geofeed.txt',
+         notes='仅取 GoMami 官方 Geofeed 标注香港、且仍由 AS36002 公告的 IPv4；未标注地区的地址不纳入。',reference='https://docs.gomami.io/en/network/locations/'),
+    dict(id='vmiss_us',name='VMISS · 美国',asns=[400464,967],country='US',geofeed='https://geofeed.cogentco.com/geofeed.csv',
+         notes='仅取 VMISS ASN 公告与 Cogent 官方 Geofeed 美国标注的交集；不将整个 ASN 或注册地视为美国机房。',reference='https://www.vmiss.com/'),
+    dict(id='isif_hk',name='ISIF Cloud · 香港',asns=[209554,154162],country='HK',geofeed='https://isif.net/geofeed.csv',
+         notes='仅取 ISIF 官方 Geofeed 标注香港、且仍由所列 ASN 公告的 IPv4；日本、新加坡和美国网段排除。',reference='https://cloud.isif.net/'),
 ]
+
 MAX_BYTES=8*1024*1024
 
 
@@ -60,6 +64,56 @@ def fetch_prefixes(asns):
     return networks
 
 
+def fetch_geofeed(url):
+    # Public operators' text feeds sometimes reject Python's default User-Agent.
+    request=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 (compatible; CFVPS-Prefix/2.0)','Accept':'text/csv,text/plain,*/*'})
+    with urllib.request.urlopen(request,timeout=25) as response:
+        body=response.read(MAX_BYTES+1)
+    if len(body)>MAX_BYTES:raise ValueError('Geofeed 响应超过 8 MiB')
+    return body.decode('utf-8-sig')
+
+
+def regional_prefixes(announced,text,country):
+    """Intersect routed space with geofeed using longest-prefix geography.
+
+    A more-specific nonmatching country overrides a broad matching record.
+    Conflicting equally specific records and unlabelled space are excluded.
+    """
+    records=[]
+    for row in csv.reader(io.StringIO(text)):
+        if len(row)<2 or row[0].lstrip().startswith('#'):continue
+        try:net=ipaddress.ip_network(row[0].strip(),strict=False)
+        except ValueError:continue
+        if net.version!=4 or not net.is_global:continue
+        cc=row[1].strip().upper()
+        if cc=='CN' and len(row)>2 and row[2].strip().upper()=='CN-HK':cc='HK'
+        if not re.fullmatch('[A-Z]{2}',cc):continue
+        records.append((int(net.network_address),int(net.broadcast_address)+1,net.prefixlen,cc))
+    if not records:raise ValueError('Geofeed 没有有效 IPv4 地区记录，拒绝回退到全 ASN')
+    answer=[]
+    for prefix in normalize(announced):
+        net=ipaddress.ip_network(prefix);low=int(net.network_address);high=int(net.broadcast_address)+1
+        overlaps=[(max(a,low),min(b,high),length,cc) for a,b,length,cc in records if a<high and b>low]
+        edges=sorted({low,high}|{value for a,b,_,_ in overlaps for value in (a,b)})
+        for a,b in zip(edges,edges[1:]):
+            matches=[(length,cc) for start,end,length,cc in overlaps if start<=a<end]
+            if not matches:continue
+            longest=max(length for length,_ in matches)
+            countries={cc for length,cc in matches if length==longest}
+            if countries=={country}:
+                answer.extend(map(str,ipaddress.summarize_address_range(ipaddress.IPv4Address(a),ipaddress.IPv4Address(b-1))))
+    networks=normalize(answer)
+    if not networks:raise ValueError(f'没有可确认属于 {country} 的公告 IPv4 网段，原缓存保持不变')
+    return networks
+
+
+def fetch_profile(profile):
+    networks=fetch_prefixes(profile['asns'])
+    if profile.get('country'):
+        networks=regional_prefixes(networks,fetch_geofeed(profile['geofeed']),profile['country'])
+    return networks
+
+
 class ProviderStore:
     def __init__(self,path):
         self.path=Path(path)
@@ -76,6 +130,11 @@ class ProviderStore:
                     raise ValueError('自定义服务商标识无效')
                 parse_asns(','.join(str(a) for a in profile['asns']))
             self.state=saved
+            allowed={p['id'] for p in self.profiles()}
+            retired=set(self.state['cache'])-allowed
+            if retired:
+                self.state['cache']={key:value for key,value in self.state['cache'].items() if key in allowed}
+                self.save()
         if 'dmit' not in self.state['cache']:
             text=(Path(__file__).resolve().parent/'dmit_prefixes.txt').read_text()
             networks=normalize([line.split('#',1)[0].strip() for line in text.splitlines() if line.split('#',1)[0].strip()])
@@ -97,6 +156,8 @@ class ProviderStore:
 
     def summary(self,profile,full=False):
         key=profile['id'];cache=self.state['cache'].get(key,{})
+        if profile.get('country') and (cache.get('country')!=profile['country'] or cache.get('geofeed')!=profile['geofeed'] or cache.get('asns')!=profile['asns']):
+            cache={}
         networks=cache.get('networks',[])
         result=dict(profile,updated_at=cache.get('updated_at'),source=cache.get('source','尚未更新'),
                     prefix_count=len(networks),ip_count=address_count(networks),refreshing=key in self.busy,error=self.errors.get(key,''))
@@ -132,10 +193,10 @@ class ProviderStore:
             self.busy.add(key);self.errors.pop(key,None)
         def update():
             try:
-                networks=fetch_prefixes(profile['asns'])
+                networks=fetch_profile(profile)
                 with self.lock:
                     previous=self.state['cache'].get(key)
-                    self.state['cache'][key]=dict(networks=networks,updated_at=time.time(),source='RIPEstat ASN 公告前缀')
+                    self.state['cache'][key]=dict(networks=networks,updated_at=time.time(),source=('RIPEstat 公告 ∩ '+profile['country']+' Geofeed') if profile.get('country') else 'RIPEstat ASN 公告前缀',country=profile.get('country'),geofeed=profile.get('geofeed'),asns=profile['asns'])
                     try:self.save()
                     except BaseException:
                         if previous is None:self.state['cache'].pop(key,None)

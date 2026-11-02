@@ -77,7 +77,7 @@ def prepare(raw):
     if total > 2_000_000:
         raise ValueError('单次任务最多 200 万个 IP:端口，请拆分网段')
     return dict(networks=[str(n) for n in nets], ports=ports, concurrency=concurrency,
-                timeout=timeout, attempts=attempts, rps=rps, total=total, kind='scan',adaptive=adaptive,min_concurrency=minimum,provider=raw.get('provider','dmit' if builtin else ''),provider_name=raw.get('provider_name','DMIT（内置快照）' if builtin else '自定义目标'),provider_asns=raw.get('provider_asns',[]),provider_updated_at=raw.get('provider_updated_at'))
+                timeout=timeout, attempts=attempts, rps=rps, total=total, kind='scan',adaptive=adaptive,min_concurrency=minimum,provider=raw.get('provider','dmit' if builtin else ''),provider_name=raw.get('provider_name','DMIT（内置快照）' if builtin else '自定义目标'),provider_asns=raw.get('provider_asns',[]),provider_updated_at=raw.get('provider_updated_at'),provider_country=raw.get('provider_country',''))
 
 
 def targets(config):

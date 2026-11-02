@@ -39,7 +39,7 @@ class EngineTests(unittest.TestCase):
             self.manager.stop_event.set()
             return {'ip':ip,'port':port,'status':'open_not_cf','verified':'','latency_ms':1}
         with patch('engine.probe', fake):
-            ident = self.manager.start({'targets':'8.8.8.0/30','ports':'443','concurrency':1})
+            ident = self.manager.start({'targets':'8.8.8.0/30','ports':'443','concurrency':1,'provider':'retired_example','provider_name':'旧服务商快照'})
             self.wait()
         self.assertEqual(self.manager.jobs()[0]['status'], 'stopped')
         self.assertEqual(self.manager.results(ident, 'all')['total'], 1)
@@ -55,6 +55,8 @@ class EngineTests(unittest.TestCase):
             self.manager.start(resume=ident)
             self.wait()
         self.assertEqual(len(calls), len(set(calls)))
+        self.assertEqual(self.manager.jobs()[0]['config']['provider'],'retired_example')
+        self.assertEqual(self.manager.jobs()[0]['config']['concurrency'],1)
         job = self.manager.jobs()[0]
         self.assertEqual((job['status'],job['done'],job['hits']), ('completed',2,1))
         self.assertEqual(self.manager.results(ident, 'verified')['total'], 1)

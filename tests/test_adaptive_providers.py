@@ -67,27 +67,27 @@ class ProviderTests(unittest.TestCase):
         self.fail('refresh did not finish')
 
     def test_presets_and_strict_target_selection(self):
-        self.assertEqual(len(self.store.list()),7)
+        self.assertEqual(len(self.store.list()),5)
         p,nets=self.store.resolve('dmit')
         self.assertTrue(nets)
         _,selected=self.store.resolve('dmit',nets[:2])
         self.assertEqual(selected,nets[:2])
-        with self.assertRaises(ValueError):self.store.resolve('vultr')
+        with self.assertRaises(ValueError):self.store.resolve('bwh')
         with self.assertRaises(ValueError):self.store.resolve('dmit',['8.8.8.0/24'])
         self.assertEqual(parse_asns('AS20473, 14061 AS20473'),[14061,20473])
         with self.assertRaises(ValueError):parse_asns('20473/../../etc/passwd')
 
     def test_refresh_failure_preserves_last_good_cache(self):
         with patch('providers.fetch_prefixes',return_value=['8.8.8.0/24']):
-            self.store.refresh('vultr');self.wait_refresh('vultr')
-        self.assertEqual(self.store.get('vultr')['networks'],['8.8.8.0/24'])
+            self.store.refresh('bwh');self.wait_refresh('bwh')
+        self.assertEqual(self.store.get('bwh')['networks'],['8.8.8.0/24'])
         with patch('providers.fetch_prefixes',side_effect=ValueError('source offline')):
-            self.store.refresh('vultr');self.wait_refresh('vultr')
-        cached=self.store.get('vultr')
+            self.store.refresh('bwh');self.wait_refresh('bwh')
+        cached=self.store.get('bwh')
         self.assertEqual(cached['networks'],['8.8.8.0/24'])
         self.assertIn('source offline',cached['error'])
         reloaded=ProviderStore(self.store.path)
-        self.assertEqual(reloaded.get('vultr')['networks'],cached['networks'])
+        self.assertEqual(reloaded.get('bwh')['networks'],cached['networks'])
 
     def test_custom_provider_persists_and_refreshes(self):
         profile=self.store.add('Example provider','AS20473')
@@ -99,3 +99,51 @@ class ProviderTests(unittest.TestCase):
 
     def test_only_global_ipv4_prefixes_and_overlap_collapse(self):
         self.assertEqual(normalize(['8.8.8.0/25','8.8.8.128/25','127.0.0.0/8','2001:4860::/32']),['8.8.8.0/24'])
+
+
+class RegionalProviderTests(unittest.TestCase):
+    def test_only_requested_five_presets_are_available(self):
+        from providers import PRESETS
+        self.assertEqual({p['id'] for p in PRESETS},{'dmit','bwh','gomami_hk','vmiss_us','isif_hk'})
+        self.assertEqual({p['id']:p.get('country') for p in PRESETS if p.get('country')},{'gomami_hk':'HK','vmiss_us':'US','isif_hk':'HK'})
+
+    def test_longest_geofeed_prefix_overrides_broad_country(self):
+        from providers import regional_prefixes
+        feed='8.8.8.0/24,US,US-CA,Los Angeles,\n8.8.8.128/25,HK,,Hong Kong,\n1.1.1.0/24,US,,,\n'
+        self.assertEqual(regional_prefixes(['8.8.8.0/24'],feed,'US'),['8.8.8.0/25'])
+        self.assertEqual(regional_prefixes(['8.8.8.0/24'],feed,'HK'),['8.8.8.128/25'])
+
+    def test_conflicting_and_missing_geography_never_fall_back_to_asn(self):
+        from providers import regional_prefixes
+        for feed in ['<html>unavailable</html>','8.8.8.0/24,US,,,\n8.8.8.0/24,HK,,,\n','1.1.1.0/24,HK,,,\n']:
+            with self.assertRaises(ValueError):regional_prefixes(['8.8.8.0/24'],feed,'HK')
+
+    def test_retired_caches_are_removed_but_kept_provider_cache_survives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'providers.json'
+            store=ProviderStore(path)
+            store.state['cache']['vultr']=dict(networks=['1.1.1.0/24'])
+            store.state['cache']['bwh']=dict(networks=['8.8.8.0/24'])
+            store.save()
+            reloaded=ProviderStore(path)
+            self.assertNotIn('vultr',json.loads(path.read_text())['cache'])
+            self.assertEqual(reloaded.get('bwh')['networks'],['8.8.8.0/24'])
+
+    def test_regional_refresh_and_cache_scope_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=ProviderStore(Path(tmp)/'providers.json')
+            store.state['cache']['gomami_hk']=dict(networks=['1.1.1.0/24'],source='unscoped ASN cache')
+            with self.assertRaises(ValueError):store.resolve('gomami_hk')
+            with patch('providers.fetch_prefixes',return_value=['8.8.8.0/24','1.1.1.0/24']),patch('providers.fetch_geofeed',return_value='8.8.8.0/24,HK,,,\n1.1.1.0/24,JP,,,\n'):
+                store.refresh('gomami_hk')
+                for _ in range(200):
+                    if not store.get('gomami_hk')['refreshing']:break
+                    time.sleep(.01)
+            self.assertEqual(store.resolve('gomami_hk')[1],['8.8.8.0/24'])
+            with patch('providers.fetch_prefixes',return_value=['8.8.8.0/24']),patch('providers.fetch_geofeed',side_effect=ValueError('geofeed offline')):
+                store.refresh('gomami_hk')
+                for _ in range(200):
+                    if not store.get('gomami_hk')['refreshing']:break
+                    time.sleep(.01)
+            self.assertEqual(store.resolve('gomami_hk')[1],['8.8.8.0/24'])
+            self.assertIn('geofeed offline',store.get('gomami_hk')['error'])

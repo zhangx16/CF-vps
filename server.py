@@ -212,7 +212,7 @@ def make_handler(manager, password, providers=None):
                 if path == '/api/start':
                     if raw.get('provider'):
                         provider,networks=providers.resolve(raw['provider'],raw.get('prefixes'))
-                        raw.update(targets='\n'.join(networks),provider_name=provider['name'],provider_asns=provider['asns'],provider_updated_at=provider['updated_at'])
+                        raw.update(targets='\n'.join(networks),provider_name=provider['name'],provider_asns=provider['asns'],provider_updated_at=provider['updated_at'],provider_country=provider.get('country',''))
                     self.reply(200, {'id': manager.start(raw)})
                 elif path == '/api/provider-refresh':
                     providers.refresh(raw.get('id',''))
