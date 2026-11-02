@@ -9,6 +9,9 @@ import json
 import os
 import signal
 import threading
+import time
+import ipaddress
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -18,8 +21,59 @@ from engine import FIELDS, Manager, connect
 ROOT = Path(__file__).resolve().parent
 
 
+class LimitedHTTPServer(ThreadingHTTPServer):
+    """Bound concurrent HTTP handlers; idle sockets have their own deadline."""
+    daemon_threads = True
+    request_queue_size = 64
+
+    def __init__(self, *args, **kwargs):
+        self.slots = threading.BoundedSemaphore(64)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, address):
+        try:
+            super().process_request_thread(request, address)
+        finally:
+            self.slots.release()
+
+
+class LoginGuard:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.entries = OrderedDict()
+
+    def blocked(self, address):
+        with self.lock:
+            entry = self.entries.get(address)
+            return bool(entry and entry[0] > time.monotonic() and entry[1] >= 10)
+
+    def record(self, address, success):
+        with self.lock:
+            if success:
+                self.entries.pop(address, None)
+                return
+            now = time.monotonic()
+            expiry, count = self.entries.pop(address, (now + 60, 0))
+            if expiry <= now:
+                expiry, count = now + 60, 0
+            self.entries[address] = (expiry, count + 1)
+            while len(self.entries) > 4096:
+                self.entries.popitem(last=False)
+
+
 def make_handler(manager, password):
     expected = 'Basic ' + base64.b64encode(('admin:' + password).encode()).decode()
+    guard = LoginGuard()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -37,14 +91,29 @@ def make_handler(manager, password):
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('X-Frame-Options', 'DENY')
-            self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
             for key, value in (extra or {}).items():
                 self.send_header(key, value)
             self.end_headers()
             self.wfile.write(payload)
 
         def authorized(self):
-            if not hmac.compare_digest(self.headers.get('Authorization', '').encode(), expected.encode()):
+            address = self.client_address[0]
+            # Only trust a single address inserted by a local reverse proxy.
+            if os.environ.get('CFVPS_TRUST_PROXY') == '1' and ipaddress.ip_address(address).is_loopback:
+                forwarded = self.headers.get('X-Real-IP', address)
+                try:
+                    address = str(ipaddress.ip_address(forwarded))
+                except ValueError:
+                    pass
+            if guard.blocked(address):
+                self.reply(429, {'error': '登录失败过多，请一分钟后再试'}, extra={'Retry-After':'60'})
+                return False
+            success = hmac.compare_digest(self.headers.get('Authorization', '').encode(), expected.encode())
+            # Initial browser challenge without credentials is not a failed login.
+            if self.headers.get('Authorization'):
+                guard.record(address, success)
+            if not success:
                 self.reply(401, {'error': '请使用 admin 和安装时生成的密码登录'}, extra={'WWW-Authenticate': 'Basic realm="CF VPS"'})
                 return False
             return True
@@ -55,15 +124,21 @@ def make_handler(manager, password):
             parsed = urlsplit(self.path)
             query = parse_qs(parsed.query)
             try:
-                if parsed.path in ('/', '/app.js', '/style.css'):
-                    name, kind = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}[parsed.path]
+                if parsed.path in ('/', '/app.js', '/style.css', '/fonts.css'):
+                    name, kind = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/fonts.css': ('fonts.css', 'text/css; charset=utf-8')}[parsed.path]
                     self.reply(200, (ROOT / 'static' / name).read_bytes(), kind)
                 elif parsed.path == '/api/jobs':
                     self.reply(200, manager.jobs())
                 elif parsed.path == '/api/results':
-                    self.reply(200, manager.results(query.get('id', [''])[0], query.get('view', ['hits'])[0], query.get('page', ['1'])[0]))
+                    self.reply(200, manager.results(query.get('id', [''])[0], query.get('view', ['hits'])[0],
+                        region=query.get('region',[''])[0], colo=query.get('colo',[''])[0],
+                        search=query.get('search',[''])[0], sort=query.get('sort',['newest'])[0], cursor=query.get('cursor',[''])[0]))
+                elif parsed.path == '/api/facets':
+                    self.reply(200, manager.facets(query.get('id',[''])[0], query.get('view',['hits'])[0]))
+                elif parsed.path == '/api/compare':
+                    self.reply(200, manager.compare(query.get('old',[''])[0], query.get('new',[''])[0], query.get('kind',['new'])[0]))
                 elif parsed.path == '/api/export':
-                    self.export(query.get('id', [''])[0], query.get('view', ['hits'])[0])
+                    self.export(query.get('id', [''])[0], query.get('view', ['hits'])[0], query.get('region',[''])[0], query.get('colo',[''])[0], query.get('search',[''])[0])
                 else:
                     self.reply(404, {'error': '未找到'})
             except (ValueError, TypeError) as exc:
@@ -71,12 +146,8 @@ def make_handler(manager, password):
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
-        def export(self, ident, view):
-            condition = 'job=?'
-            if view != 'all':
-                condition += " AND status='hit'"
-            if view == 'verified':
-                condition += " AND verified='1'"
+        def export(self, ident, view, region='', colo='', search=''):
+            condition, args = manager.condition(ident,view,region,colo,search)
             with connect(manager.path) as db:
                 if not db.execute('SELECT 1 FROM jobs WHERE id=?', (ident,)).fetchone():
                     self.reply(404, {'error': '任务不存在'})
@@ -96,11 +167,12 @@ def make_handler(manager, password):
                 cursor = 0
                 maximum = db.execute('SELECT COALESCE(MAX(rowid),0) FROM results WHERE job=?', (ident,)).fetchone()[0]
                 while True:
-                    rows = db.execute(f'SELECT rowid,data FROM results WHERE {condition} AND rowid>? AND rowid<=? ORDER BY rowid LIMIT 200', (ident, cursor, maximum)).fetchall()
+                    rows = db.execute(f'SELECT rowid,data FROM results WHERE {condition} AND rowid>? AND rowid<=? ORDER BY rowid LIMIT 200', args + [cursor, maximum]).fetchall()
                     if not rows:
                         break
                     for row in rows:
                         data = json.loads(row['data'])
+                        data.setdefault('request_ms', data.get('latency_ms',''))
                         # Remote headers must not become spreadsheet formulas.
                         for key, value in data.items():
                             if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@')):
@@ -135,6 +207,17 @@ def make_handler(manager, password):
                     if not isinstance(ident, str) or not ident:
                         raise ValueError('缺少任务 ID')
                     self.reply(200, {'id': manager.start(resume=ident)})
+                elif path == '/api/retest':
+                    ident = raw.get('id')
+                    if not isinstance(ident,str) or not ident:
+                        raise ValueError('缺少原任务 ID')
+                    self.reply(200, {'id': manager.start(raw, retest=ident)})
+                elif path == '/api/delete':
+                    ident = raw.get('id')
+                    if not isinstance(ident,str) or not ident:
+                        raise ValueError('缺少任务 ID')
+                    manager.delete(ident)
+                    self.reply(200, {'ok': True})
                 elif path == '/api/stop':
                     manager.stop()
                     self.reply(200, {'ok': True})
@@ -162,7 +245,7 @@ def main():
     except BlockingIOError:
         raise SystemExit('该数据目录已有一个面板实例正在运行')
     manager = Manager(data / 'scan.db')
-    server = ThreadingHTTPServer((os.environ.get('CFVPS_HOST', '0.0.0.0'), int(os.environ.get('CFVPS_PORT', '8787'))), make_handler(manager, password))
+    server = LimitedHTTPServer((os.environ.get('CFVPS_HOST', '0.0.0.0'), int(os.environ.get('CFVPS_PORT', '8787'))), make_handler(manager, password))
     def shutdown(*_):
         manager.stop()
         threading.Thread(target=server.shutdown, daemon=True).start()

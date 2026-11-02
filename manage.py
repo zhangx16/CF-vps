@@ -12,6 +12,8 @@ import secrets
 import shlex
 import shutil
 import sqlite3
+from contextlib import closing
+import re
 import subprocess
 import sys
 import tarfile
@@ -24,6 +26,8 @@ CONFIG = Path('/etc/cf-vps.env')
 UNIT = Path('/etc/systemd/system/cf-vps.service')
 BACKUPS = Path('/var/backups/cf-vps')
 COMMAND = Path('/usr/local/bin/cf-vps')
+PREVIOUS = Path('/opt/cf-vps-previous')
+RELEASES = Path('/opt/cf-vps-releases')
 INSTALL_URL = 'https://raw.githubusercontent.com/zhangx16/CF-vps/main/install.sh'
 
 
@@ -110,6 +114,8 @@ def info(show_password=False):
         print(f'公网访问：http://服务器公网IP:{port}（防火墙和云安全组需放行 TCP {port}）')
     else:
         print(f'访问地址：http://{host}:{port}')
+    if config.get('CFVPS_DOMAIN'):
+        print('HTTPS 地址：https://' + config['CFVPS_DOMAIN'])
     print(f'配置：{CONFIG}\n数据：{data_dir()}\n备份：{BACKUPS}')
     if show_password:
         print('密码：' + config.get('CFVPS_PASSWORD', '未设置'))
@@ -130,7 +136,7 @@ def backup(quiet=False):
             source = data_dir() / 'scan.db'
             if source.exists():
                 # SQLite's backup API includes committed WAL records without stopping scans.
-                with sqlite3.connect(source, timeout=30) as src, sqlite3.connect(tmp / 'scan.db') as dest:
+                with closing(sqlite3.connect(source, timeout=30)) as src, closing(sqlite3.connect(tmp / 'scan.db')) as dest:
                     src.backup(dest, pages=256, sleep=0.1)
             shutil.copyfile(CONFIG, tmp / 'cf-vps.env')
             (tmp / 'manifest.json').write_text(json.dumps({'format': 1, 'created': stamp}))
@@ -140,6 +146,7 @@ def backup(quiet=False):
     except BaseException:
         output.unlink(missing_ok=True)
         raise
+    prune_backups()
     if not quiet:
         print(f'备份完成：{output}\n含配置、登录密码与已提交的任务数据；扫描无需停止。')
     return output
@@ -175,9 +182,26 @@ def set_port(value):
     port = int(value)
     if not 1 <= port <= 65535:
         raise ValueError('端口必须在 1–65535')
-    config = read_config()
+    previous = read_config()
+    config = dict(previous)
     config['CFVPS_PORT'] = str(port)
+    domain = config.get('CFVPS_DOMAIN')
+    site = Path('/etc/nginx/sites-available') / domain if domain else None
+    original = site.read_text() if site and site.exists() else None
     apply_config(config)
+    try:
+        if site:
+            if original is None or '# Managed by CF VPS' not in original:
+                raise ValueError('域名配置不属于 CF VPS，无法自动修改上游端口')
+            site.write_text(nginx_text(domain,port,True))
+            run('nginx','-t')
+            run('systemctl','reload','nginx')
+    except BaseException:
+        if site and original is not None:
+            site.write_text(original)
+        apply_config(previous)
+        run('systemctl','reload','nginx',check=False)
+        raise
     if config.get('CFVPS_HOST', '0.0.0.0') == '0.0.0.0':
         print(f'请在防火墙与云安全组放行新端口 TCP {port}；旧端口规则需自行移除。')
     info()
@@ -198,7 +222,7 @@ def set_password():
     print(f'用户名：admin\n新密码：{value}')
 
 
-def restore(path):
+def restore(path, confirmed=False, safety_backup=True):
     require_install()
     path = Path(path).expanduser().resolve(strict=True)
     with tempfile.TemporaryDirectory() as tmp:
@@ -226,17 +250,17 @@ def restore(path):
             raise ValueError('备份端口无效')
         source = tmp / 'scan.db'
         if source.exists():
-            with sqlite3.connect(source) as db:
+            with closing(sqlite3.connect(source)) as db:
                 if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise ValueError('备份数据库损坏')
                 tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if not {'jobs', 'results'} <= tables:
                     raise ValueError('备份数据库缺少任务表')
         print(f'将恢复：{path}\n当前配置和扫描记录会先自动备份。')
-        if input('输入 RESTORE 确认覆盖当前数据：').strip() != 'RESTORE':
+        if not confirmed and input('输入 RESTORE 确认覆盖当前数据：').strip() != 'RESTORE':
             print('已取消。')
             return
-        safety = backup()
+        safety = backup() if safety_backup else None
         target = data_dir()
         config['CFVPS_DATA'] = str(target)
         was_active = active()
@@ -281,13 +305,163 @@ def uninstall(purge=False):
         raise ValueError('服务未成功停止，已中止删除程序和数据')
     UNIT.unlink(missing_ok=True)
     run('systemctl', 'daemon-reload')
-    if APP.exists():
+    if APP.is_symlink():
+        APP.unlink()
+    elif APP.exists():
         shutil.rmtree(APP)
+    PREVIOUS.unlink(missing_ok=True)
+    if RELEASES.exists():
+        shutil.rmtree(RELEASES)
     if purge:
         if target.exists():
             shutil.rmtree(target)
         CONFIG.unlink(missing_ok=True)
     print(f'卸载完成。管理命令和备份仍保留：{COMMAND}、{BACKUPS}')
+
+
+def prune_backups():
+    keep = max(1, int(read_config().get('CFVPS_BACKUP_KEEP', '10')))
+    protected = set()
+    for release in (APP, PREVIOUS):
+        pointer = release / '.rollback-backup'
+        if pointer.is_file():
+            protected.add(pointer.read_text().strip())
+    paths = sorted(BACKUPS.glob('cf-vps-*.tar.gz'), key=lambda p:p.stat().st_mtime, reverse=True)
+    for path in paths[keep:]:
+        if str(path) not in protected:
+            path.unlink()
+
+
+def retention(value):
+    keep = int(value)
+    if not 1 <= keep <= 1000:
+        raise ValueError('备份保留数量应为 1–1000')
+    config = read_config()
+    if not config:
+        raise ValueError('请先安装')
+    config['CFVPS_BACKUP_KEEP'] = str(keep)
+    write_config(config)
+    prune_backups()
+    print(f'备份保留数量已设为 {keep}；升级回滚需要的备份额外保留。')
+
+
+def rollback():
+    require_install()
+    if not PREVIOUS.is_symlink() or not PREVIOUS.is_dir():
+        raise ValueError('没有可回滚的程序版本')
+    snapshot = APP / '.rollback-backup'
+    if not snapshot.is_file() or not Path(snapshot.read_text().strip()).is_file():
+        raise ValueError('缺少上一版本对应的数据备份，已中止回滚')
+    target = PREVIOUS.resolve()
+    current = APP.resolve()
+    archive = Path(snapshot.read_text().strip())
+    print(f'将回滚程序与配置/数据快照到上一版本：{target.name}')
+    if input('输入 ROLLBACK 确认回滚：').strip() != 'ROLLBACK':
+        return
+    safety = backup()
+    was_active = active()
+    run('systemctl','stop','cf-vps')
+    temp = APP.parent / '.cf-vps-rollback'
+    try:
+        temp.unlink(missing_ok=True)
+        temp.symlink_to(target)
+        os.replace(temp, APP)
+        restore(archive, confirmed=True, safety_backup=False)
+        shutil.copy2(APP/'manage.py', COMMAND)
+        os.chmod(COMMAND, 0o755)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        temp.symlink_to(current)
+        os.replace(temp, APP)
+        restore(safety, confirmed=True, safety_backup=False)
+        raise
+    finally:
+        if was_active:
+            run('systemctl','start','cf-vps')
+    PREVIOUS.unlink(missing_ok=True)
+    print('已回滚到上一版本；回滚前数据已保留备份。')
+
+
+def nginx_text(domain, port, tls):
+    challenge = 'location ^~ /.well-known/acme-challenge/ { root /var/www/html; default_type text/plain; }'
+    text = f'# Managed by CF VPS\nserver {{\n listen 80;\n listen [::]:80;\n server_name {domain};\n {challenge}\n'
+    text += ' location / { return 301 https://$host$request_uri; }\n}\n' if tls else ' location / { return 404; }\n}\n'
+    if tls:
+        text += f"""server {{
+ listen 443 ssl;
+ listen [::]:443 ssl;
+ server_name {domain};
+ ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;
+ ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
+ ssl_protocols TLSv1.2 TLSv1.3;
+ client_max_body_size 80k;
+ add_header Strict-Transport-Security "max-age=31536000" always;
+ location / {{
+  proxy_pass http://127.0.0.1:{port};
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_read_timeout 300s;
+  proxy_buffering off;
+ }}
+}}
+"""
+    return text
+
+
+def configure_domain(domain):
+    require_install()
+    domain = domain.lower().strip().rstrip('.')
+    if len(domain)>253 or not re.fullmatch(r'(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}',domain):
+        raise ValueError('请输入有效域名，不含 https:// 或路径')
+    if not shutil.which('nginx') or not shutil.which('certbot'):
+        run('apt-get','update')
+        run('apt-get','install','-y','nginx','certbot')
+    available = Path('/etc/nginx/sites-available') / domain
+    enabled = Path('/etc/nginx/sites-enabled') / domain
+    available.parent.mkdir(parents=True,exist_ok=True)
+    enabled.parent.mkdir(parents=True,exist_ok=True)
+    if available.exists() and '# Managed by CF VPS' not in available.read_text():
+        raise ValueError(f'{available} 已存在且不属于 CF VPS，请先检查该站点配置')
+    old = available.read_text() if available.exists() else None
+    linked = enabled.exists()
+    previous_config = read_config()
+    config = dict(previous_config)
+    port = int(config.get('CFVPS_PORT','8787'))
+    Path('/var/www/html/.well-known/acme-challenge').mkdir(parents=True,exist_ok=True)
+    cert = Path('/etc/letsencrypt/live') / domain / 'fullchain.pem'
+    try:
+        available.write_text(nginx_text(domain,port,cert.exists()))
+        if not linked:
+            enabled.symlink_to(available)
+        run('nginx','-t')
+        run('systemctl','reload','nginx')
+        run('certbot','certonly','--webroot','-w','/var/www/html','-d',domain,'--non-interactive','--agree-tos','--register-unsafely-without-email')
+        available.write_text(nginx_text(domain,port,True))
+        run('nginx','-t')
+        config.update(CFVPS_DOMAIN=domain,CFVPS_HOST='127.0.0.1',CFVPS_TRUST_PROXY='1')
+        apply_config(config)
+        run('systemctl','reload','nginx')
+        hooks=Path('/etc/letsencrypt/renewal-hooks/deploy')
+        hooks.mkdir(parents=True,exist_ok=True)
+        hook=hooks/'cf-vps-nginx.sh'
+        hook.write_text('#!/bin/sh\nnginx -t && systemctl reload nginx\n')
+        hook.chmod(0o755)
+    except BaseException:
+        write_config(previous_config)
+        if old is None:
+            available.unlink(missing_ok=True)
+        else:
+            available.write_text(old)
+        if not linked:
+            enabled.unlink(missing_ok=True)
+        run('nginx','-t',check=False)
+        run('systemctl','reload','nginx',check=False)
+        run('systemctl','restart','cf-vps',check=False)
+        raise
+    print(f'HTTPS 已配置：https://{domain}；后端改为仅本机监听。')
 
 
 def list_backups():
@@ -306,7 +480,7 @@ def menu():
               ' 4. 启动服务\n 5. 停止服务\n 6. 重启服务\n 7. 查看最近日志\n'
               ' 8. 备份配置与数据\n 9. 从备份恢复\n10. 开放公网访问\n'
               '11. 改为仅本机访问\n12. 修改端口\n13. 修改登录密码\n'
-              '14. 查看登录密码\n15. 卸载（保留数据）\n16. 卸载并删除数据\n 0. 退出')
+              '14. 查看登录密码\n15. 卸载（保留数据）\n16. 卸载并删除数据\n17. 配置域名与 HTTPS\n18. 回滚上一程序版本\n19. 设置备份保留数量\n 0. 退出')
         choice = input('请选择：').strip()
         try:
             if choice == '0':
@@ -343,6 +517,12 @@ def menu():
                 set_password()
             elif choice == '14':
                 info(show_password=True)
+            elif choice == '17':
+                configure_domain(input('域名：').strip())
+            elif choice == '18':
+                rollback()
+            elif choice == '19':
+                retention(input('备份保留数量：').strip())
             elif choice in ('15', '16'):
                 uninstall(purge=choice == '16')
             else:
@@ -353,7 +533,7 @@ def menu():
 
 def main():
     parser = argparse.ArgumentParser(description='CF VPS 中文管理菜单及快捷命令')
-    parser.add_argument('command', nargs='?', default='menu', choices=['menu','install','upgrade','status','info','start','stop','restart','logs','backup','backups','restore','public','private','port','password','uninstall'])
+    parser.add_argument('command', nargs='?', default='menu', choices=['menu','install','upgrade','status','info','start','stop','restart','logs','backup','backups','restore','public','private','port','password','uninstall','domain','rollback','retention'])
     parser.add_argument('value', nargs='?', help='restore 的备份路径或 port 的端口号')
     parser.add_argument('--purge', action='store_true', help='卸载时同时删除配置和扫描数据，仍保留自动备份')
     args = parser.parse_args()
@@ -395,6 +575,16 @@ def main():
                 set_port(args.value)
             elif cmd == 'password':
                 set_password()
+            elif cmd == 'domain':
+                if not args.value:
+                    raise ValueError('用法：cf-vps domain scan.example.com')
+                configure_domain(args.value)
+            elif cmd == 'rollback':
+                rollback()
+            elif cmd == 'retention':
+                if not args.value:
+                    raise ValueError('用法：cf-vps retention 10')
+                retention(args.value)
             elif cmd == 'uninstall':
                 uninstall(args.purge)
         except (ValueError, OSError, sqlite3.Error, tarfile.TarError, subprocess.CalledProcessError) as exc:

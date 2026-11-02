@@ -33,7 +33,7 @@ class EngineTests(unittest.TestCase):
 
     def test_stop_resume_skips_nonhits_and_recovers_restart(self):
         calls = []
-        async def fake(ip, port, timeout, sem):
+        async def fake(ip, port, timeout, sem, **kwargs):
             calls.append((ip, port))
             # One completed result, then stop; all results must become checkpoints.
             self.manager.stop_event.set()
@@ -48,9 +48,9 @@ class EngineTests(unittest.TestCase):
             db.execute("UPDATE jobs SET status='running' WHERE id=?", (ident,))
         self.manager = Manager(self.manager.path)
         self.assertEqual(self.manager.jobs()[0]['status'], 'interrupted')
-        async def hit(ip, port, timeout, sem):
+        async def hit(ip, port, timeout, sem, **kwargs):
             calls.append((ip, port))
-            return {'ip':ip,'port':port,'status':'hit','verified':'1','latency_ms':2}
+            return {'ip':ip,'port':port,'status':'hit','verified':'1','evidence':'dual_verified','latency_ms':2}
         with patch('engine.probe', hit):
             self.manager.start(resume=ident)
             self.wait()
@@ -60,7 +60,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.manager.results(ident, 'verified')['total'], 1)
 
     def test_failure_is_visible(self):
-        async def fail(*args):
+        async def fail(*args, **kwargs):
             raise RuntimeError('simulated failure')
         with patch('engine.probe', fail):
             self.manager.start({'targets':'8.8.8.8','ports':'443'})
@@ -70,11 +70,13 @@ class EngineTests(unittest.TestCase):
         self.assertIn('simulated failure', job['error'])
 
     def test_retries(self):
+        from probing import observe
         calls = []
-        async def fake(ip, port, *args):
+        async def fake(ip, port, sni, timeout):
             calls.append(ip)
-            return {'ip':ip,'port':port,'status':'closed_or_error','verified':'','err':'TimeoutError'}
-        with patch('engine.probe', fake):
+            return dict(is_cf=False,trace_valid=False,server='',cf_ray='',trace={},http_status=None,
+                        err='TimeoutError',error_kind='connect_timeout',request_ms=10,connect_ms=None,tls_ms=None,ttfb_ms=None)
+        with patch('probing.observe', fake):
             self.manager.start({'targets':'8.8.8.8','ports':'443','attempts':3})
             self.wait()
         self.assertEqual(len(calls), 3)

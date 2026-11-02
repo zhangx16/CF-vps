@@ -28,7 +28,9 @@ class ManagementTests(unittest.TestCase):
         self.backups = root / 'backups'
         self.patches = [patch.object(manage, 'APP', self.app), patch.object(manage, 'CONFIG', self.config),
                         patch.object(manage, 'UNIT', self.unit), patch.object(manage, 'BACKUPS', self.backups),
-                        patch.object(manage, 'COMMAND', root / 'cf-vps')]
+                        patch.object(manage, 'COMMAND', root / 'cf-vps'),
+                        patch.object(manage, 'PREVIOUS', root / 'previous'),
+                        patch.object(manage, 'RELEASES', root / 'releases')]
         for p in self.patches:
             p.start()
         manage.write_config({'CFVPS_HOST':'127.0.0.1', 'CFVPS_PORT':'8787',
@@ -148,3 +150,40 @@ class ManagementTests(unittest.TestCase):
     def test_menu_exit(self):
         with patch('builtins.input', return_value='0'):
             manage.menu()
+
+    def test_retention_keeps_upgrade_snapshot(self):
+        first=manage.backup(quiet=True)
+        pointer=self.app/'.rollback-backup'
+        pointer.write_text(str(first))
+        manage.backup(quiet=True)
+        manage.backup(quiet=True)
+        manage.retention('1')
+        self.assertTrue(first.exists())
+        self.assertEqual(len(list(self.backups.glob('*.tar.gz'))),2)
+
+    def test_manual_code_and_data_rollback(self):
+        snapshot=manage.backup(quiet=True)
+        self.db.close()
+        current=Path(self.tmp.name)/'current-release'
+        self.app.rename(current)
+        (current/'.rollback-backup').write_text(str(snapshot))
+        previous=Path(self.tmp.name)/'old-release'
+        previous.mkdir()
+        (previous/'server.py').write_text('# old server')
+        (previous/'manage.py').write_text('# old manager')
+        self.app.symlink_to(current)
+        manage.PREVIOUS.symlink_to(previous)
+        with sqlite3.connect(self.data/'scan.db') as db:
+            db.execute("UPDATE jobs SET id='newer-job'")
+        account=types.SimpleNamespace(pw_uid=os.getuid(),pw_gid=os.getgid())
+        with patch('builtins.input',return_value='ROLLBACK'),patch.object(manage,'run'),patch.object(manage,'active',return_value=False),patch.object(manage.pwd,'getpwnam',return_value=account):
+            manage.rollback()
+        self.assertEqual(self.app.resolve(),previous)
+        with sqlite3.connect(self.data/'scan.db') as db:
+            self.assertEqual(db.execute('SELECT id FROM jobs').fetchone()[0],'checkpoint-job')
+        self.assertFalse(manage.PREVIOUS.exists())
+
+    def test_domain_validation_precedes_side_effects(self):
+        with patch.object(manage,'run') as run:
+            with self.assertRaises(ValueError):manage.configure_domain('bad.example.com;touch /tmp/test')
+        run.assert_not_called()

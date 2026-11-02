@@ -60,9 +60,9 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.request('POST', '/api/resume', {})[0], 400)
 
     def test_start_results_export_and_busy(self):
-        async def fake(ip, port, *args):
+        async def fake(ip, port, *args, **kwargs):
             await asyncio.sleep(0.1)
-            return dict(ip=ip,port=port,status='hit',verified='1',latency_ms=12,server='=FORMULA()')
+            return dict(ip=ip,port=port,status='hit',verified='1',evidence='dual_verified',latency_ms=12,server='=FORMULA()')
         with patch('engine.probe', fake):
             status, _, body = self.request('POST', '/api/start', {'targets':'8.8.8.0/30','ports':'443','concurrency':1})
             self.assertEqual(status, 200)
@@ -126,3 +126,18 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result[0])
         self.assertEqual(result[5], 'TimeoutError')
         self.assertLess(elapsed, .7)
+
+
+class LoginGuardTests(unittest.TestCase):
+    def test_failed_logins_expire_and_good_login_resets_counter(self):
+        from server import LoginGuard
+        guard=LoginGuard()
+        with patch('server.time.monotonic',return_value=100):
+            for _ in range(10):guard.record('192.0.2.1',False)
+            self.assertTrue(guard.blocked('192.0.2.1'))
+            self.assertFalse(guard.blocked('192.0.2.2'))
+            guard.record('192.0.2.1',True)
+            self.assertFalse(guard.blocked('192.0.2.1'))
+            for _ in range(10):guard.record('192.0.2.1',False)
+        with patch('server.time.monotonic',return_value=161):
+            self.assertFalse(guard.blocked('192.0.2.1'))
