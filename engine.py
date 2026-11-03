@@ -16,7 +16,7 @@ from adaptive import AdaptiveLimiter
 from providers import normalize
 
 ROOT = Path(__file__).resolve().parent
-FIELDS = ['ip', 'port', 'job_id', 'task_name', 'provider_name', 'status', 'evidence', 'verification', 'server', 'cf_ray', 'colo', 'loc',
+FIELDS = ['ip', 'port', 'job_id', 'task_name', 'provider_name', 'ip_country', 'ip_country_source', 'ip_country_updated', 'status', 'evidence', 'verification', 'server', 'cf_ray', 'colo', 'loc',
           'trace_ip', 'verified', 'request_ms', 'connect_ms', 'tls_ms', 'ttfb_ms', 'http_status',
           'verify_cf_ray', 'verify_colo', 'verify_error', 'error_kind', 'err', 'observed_at']
 
@@ -131,6 +131,9 @@ class Manager:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS favorites (ip TEXT PRIMARY KEY, created REAL);
                 CREATE TABLE IF NOT EXISTS endpoint_favorites (ip TEXT, port INTEGER, created REAL, PRIMARY KEY(ip,port));
+                CREATE TABLE IF NOT EXISTS geo_cache (ip TEXT PRIMARY KEY, country TEXT, source TEXT, updated REAL, expires REAL, error TEXT);
+                CREATE TABLE IF NOT EXISTS geo_feeds (url TEXT PRIMARY KEY, data TEXT, updated REAL);
+                CREATE TABLE IF NOT EXISTS geo_usage (day TEXT PRIMARY KEY, requests INTEGER);
                 CREATE TABLE IF NOT EXISTS jobs (
                   id TEXT PRIMARY KEY, created REAL, updated REAL, status TEXT,
                   config TEXT, total INTEGER, done INTEGER DEFAULT 0,
@@ -234,7 +237,7 @@ class Manager:
                 db.execute('DELETE FROM favorite_snapshots WHERE ip=? AND port=?',(ip,port))
         return dict(ip=ip,port=port,favorite=enabled)
 
-    def selection_condition(self,ident,view='hits',region='',colo='',search='',provider='',favorites=False):
+    def selection_condition(self,ident,view='hits',region='',colo='',search='',provider='',favorites=False,ip_country=''):
         condition,args=self.condition(ident,view,region,colo,search)
         sources=self.job_sources()
         if provider:
@@ -245,6 +248,11 @@ class Manager:
             condition='1=1'+condition[len('job=?'):];args=args[1:]
         if favorites:
             condition += ' AND (ip,port) IN (SELECT ip,port FROM endpoint_favorites) AND rowid IN (SELECT MAX(rowid) FROM results GROUP BY ip,port)'
+        if ip_country:
+            if ip_country!='UNKNOWN' and (len(ip_country)!=2 or not ip_country.isascii() or not ip_country.isupper() or not ip_country.isalpha()):
+                raise ValueError('IP 地区筛选无效')
+            condition += " AND COALESCE((SELECT country FROM geo_cache WHERE geo_cache.ip=results.ip),'UNKNOWN')=?"
+            args.append(ip_country)
         return condition,args,sources
 
     def start(self, raw=None, resume=None, retest=None):
@@ -437,18 +445,20 @@ class Manager:
         with connect(self.path,favorites=favorites) as db:
             regions = [dict(r) for r in db.execute(f"SELECT COALESCE(NULLIF(loc,''),'UNKNOWN') AS value,COUNT(*) AS count FROM results WHERE {condition} GROUP BY value ORDER BY count DESC",args)]
             colos = [dict(r) for r in db.execute(f"SELECT colo AS value,COUNT(*) AS count FROM results WHERE {condition} AND colo!='' GROUP BY colo ORDER BY count DESC",args)]
-        return dict(regions=regions,colos=colos)
+            ip_regions = [dict(r) for r in db.execute(f"SELECT COALESCE((SELECT country FROM geo_cache WHERE geo_cache.ip=results.ip),'UNKNOWN') AS value,COUNT(*) AS count FROM results WHERE {condition} GROUP BY value ORDER BY count DESC",args)]
+        return dict(regions=regions,colos=colos,ip_regions=ip_regions)
 
-    def results(self, ident, view='hits', page=1, limit=100, region='', colo='', search='', sort='newest', cursor='',provider='',favorites=False):
+    def results(self, ident, view='hits', page=1, limit=100, region='', colo='', search='', sort='newest', cursor='',provider='',favorites=False,ip_country=''):
         page = max(1,min(int(page),100000))
         limit = max(1,min(int(limit),200))
         choices = {'newest':('rowid','DESC'),'latency_asc':('COALESCE(latency,1e30)','ASC'),
                    'latency_desc':('COALESCE(latency,-1)','DESC'),'ip':('ip_num','ASC'),
+                   'ip_region':("COALESCE((SELECT country FROM geo_cache WHERE geo_cache.ip=results.ip),'UNKNOWN')",'ASC'),
                    'region':("COALESCE(loc,'')",'ASC'),'colo':("COALESCE(colo,'')",'ASC')}
         if sort not in choices:
             raise ValueError('排序无效')
         key, direction = choices[sort]
-        condition, args, sources = self.selection_condition(ident,view,region,colo,search,provider,favorites)
+        condition, args, sources = self.selection_condition(ident,view,region,colo,search,provider,favorites,ip_country)
         with connect(self.path,favorites=favorites) as db:
             total = db.execute(f'SELECT COUNT(*) FROM results WHERE {condition}',args).fetchone()[0]
             where, values = condition, list(args)
@@ -472,6 +482,7 @@ class Manager:
                 data = json.loads(row['data'])
                 history = db.execute('SELECT MIN(CASE WHEN hit=1 THEN observed END) AS first_seen,MAX(CASE WHEN confirmed=1 THEN observed END) AS last_confirmed,COUNT(*) AS checks,COALESCE(SUM(hit),0) AS successes,COALESCE(SUM(confirmed),0) AS confirmations FROM observations WHERE ip=? AND port=?',(data['ip'],data['port'])).fetchone()
                 data['history'] = dict(history)
+                self.attach_ip_country(db,data)
                 data['favorite'] = db.execute('SELECT 1 FROM endpoint_favorites WHERE ip=? AND port=?',(data['ip'],data['port'])).fetchone() is not None
                 source=sources.get(row['job'],{})
                 data.update(job_id=row['job'],task_name=source.get('task_name',data.get('task_name','')),provider_name=source.get('provider_name',data.get('provider_name','未知来源')),job_created=source.get('created',data.get('job_created')))
@@ -481,6 +492,13 @@ class Manager:
                 last = rows[-1]
                 next_cursor = base64.urlsafe_b64encode(json.dumps(dict(sort=sort,value=last['sortkey'],rowid=last['rowid'])).encode()).decode()
             return dict(total=total,page=page,items=items,next_cursor=next_cursor)
+
+    @staticmethod
+    def attach_ip_country(db, data):
+        row=db.execute('SELECT country,source,updated,error,expires FROM geo_cache WHERE ip=?',(data['ip'],)).fetchone()
+        data.update(ip_country=row['country'] if row else 'UNKNOWN',ip_country_source=row['source'] if row else '',
+                    ip_country_updated=row['updated'] if row else None,ip_country_error=row['error'] if row else '',
+                    ip_country_retry=not row or row['expires']<=time.time())
 
     def delete(self, ident):
         with self.lock:

@@ -11,9 +11,9 @@
   }catch(e){message(e);}finally{loading=false;}
  },
  activate({job='*',view='all',favorites=false}={}){
-  center.active=true;center.favorites=favorites;center.pendingRegion='';document.body.classList.add('center-mode');get('catalog-context').hidden=false;get('catalog-provider').value='';fillJobs(job);get('view').value=view;get('region').value='';get('colo').value='';get('search').value='';checked.clear();resetPage();updateContext();selectionState();refresh();get('results').scrollIntoView({behavior:'instant'});if(innerWidth<768){document.body.classList.remove('nav-open');get('nav-backdrop').hidden=true;get('nav-toggle').setAttribute('aria-expanded','false');}
+  center.active=true;center.favorites=favorites;center.pendingRegion='';document.body.classList.add('center-mode');get('catalog-context').hidden=false;get('catalog-provider').value='';fillJobs(job);get('view').value=view;get('region').value='';get('ip-country').value='';get('colo').value='';get('search').value='';checked.clear();resetPage();updateContext();selectionState();refresh();get('results').scrollIntoView({behavior:'instant'});if(innerWidth<768){document.body.classList.remove('nav-open');get('nav-backdrop').hidden=true;get('nav-toggle').setAttribute('aria-expanded','false');}
  },
- exit(){center.active=false;center.favorites=false;center.pendingRegion='';document.body.classList.remove('center-mode','center-all');get('catalog-context').hidden=true;get('results-title').textContent='探测记录';get('results-hint').textContent='点击 IP:端口复制纯 IP。地区为 CF 观察到的出口地区。';get('region').value='';get('colo').value='';checked.clear();resetPage();updateContext();refresh();}
+ exit(){center.active=false;center.favorites=false;center.pendingRegion='';document.body.classList.remove('center-mode','center-all');get('catalog-context').hidden=true;get('results-title').textContent='探测记录';get('results-hint').textContent='点击 IP:端口复制纯 IP。IP 地区为参考定位，节点实际出口需本地实测。';get('region').value='';get('ip-country').value='';get('colo').value='';checked.clear();resetPage();updateContext();refresh();}
 };
 function taskName(j){return j.task_name||j.provider_name||'自定义目标';}
 function renderTaskNav(){
@@ -39,6 +39,6 @@ function updateContext(){
 function fillJobs(value){get('catalog-job').replaceChildren();const all=document.createElement('option');all.value='*';all.textContent='全部测试';get('catalog-job').append(all);for(const j of center.jobs){if(get('catalog-provider').value&&j.provider!==get('catalog-provider').value)continue;const o=document.createElement('option');o.value=j.id;o.textContent=`${taskName(j)} · ${timestamp(j.created)} · ${labels[j.status]}`;get('catalog-job').append(o);}if([...get('catalog-job').options].some(o=>o.value===value))get('catalog-job').value=value;}
 get('delete-result-task').onclick=async()=>{const job=center.jobs.find(j=>j.id===get('catalog-job').value);if(!job||!confirm(`删除测试“${taskName(job)}”及其探测记录？此操作不能撤销。`))return;try{await api('/api/delete',{id:job.id});last=0;await center.refreshMeta();center.activate();}catch(e){message(e);}};
 get('center-favorites-nav').onclick=()=>center.activate({favorites:true});get('center-all-nav').onclick=()=>center.activate();
-get('catalog-provider').onchange=()=>{fillJobs('*');get('region').value='';get('colo').value='';checked.clear();resetPage();updateContext();refresh();};get('catalog-job').onchange=()=>{get('region').value='';get('colo').value='';checked.clear();resetPage();updateContext();refresh();};
+get('catalog-provider').onchange=()=>{fillJobs('*');get('region').value='';get('ip-country').value='';get('colo').value='';checked.clear();resetPage();updateContext();refresh();};get('catalog-job').onchange=()=>{get('region').value='';get('ip-country').value='';get('colo').value='';checked.clear();resetPage();updateContext();refresh();};
 center.refreshMeta();
 })();
