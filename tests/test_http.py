@@ -13,7 +13,8 @@ from unittest.mock import patch
 
 from engine import Manager
 from scan_dmit_cf_fallback import probe_once
-from server import make_handler
+from server import make_handler, csv_disposition
+from urllib.parse import unquote
 from providers import ProviderStore
 
 
@@ -66,7 +67,7 @@ class DashboardTests(unittest.TestCase):
             await asyncio.sleep(0.1)
             return dict(ip=ip,port=port,status='hit',verified='1',evidence='dual_verified',latency_ms=12,server='=FORMULA()')
         with patch('engine.probe', fake):
-            status, _, body = self.request('POST', '/api/start', {'targets':'8.8.8.0/30','ports':'443','concurrency':1})
+            status, _, body = self.request('POST', '/api/start', {'targets':'8.8.8.0/30','ports':'443','concurrency':1,'task_name':'香港晚间测试'})
             self.assertEqual(status, 200)
             ident = json.loads(body)['id']
             self.assertEqual(self.request('POST', '/api/start', {'targets':'8.8.8.8'})[0], 400)
@@ -76,8 +77,18 @@ class DashboardTests(unittest.TestCase):
         status, headers, body = self.request('GET', f'/api/export?id={ident}&view=all')
         self.assertEqual(status, 200)
         self.assertIn('attachment', headers['Content-Disposition'])
+        self.assertIn('香港晚间测试.csv',unquote(headers['Content-Disposition']))
         self.assertIn(b"'=FORMULA()", body)
         self.assertEqual(self.request('GET', '/api/export?id=missing')[0], 404)
+
+    def test_csv_filename_sanitization_and_global_scope(self):
+        value=csv_disposition('job12345',{'job12345':{'task_name':'香港/测试:01\r\n"'}})
+        self.assertNotIn('\r',value)
+        self.assertNotIn('\n',value)
+        self.assertIn('香港_测试_01___.csv',unquote(value))
+        self.assertIn('全部测试结果.csv',unquote(csv_disposition('*',{})))
+        self.assertIn('收藏夹.csv',unquote(csv_disposition('*',{},True)))
+        self.assertIn('测试结果-job12345.csv',unquote(csv_disposition('job12345',{})))
 
     def test_provider_selection_and_adaptive_settings(self):
         self.assertEqual(len(json.loads(self.request('GET','/api/providers')[2])),5)

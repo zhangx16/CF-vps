@@ -7,6 +7,7 @@ import hmac
 import io
 import json
 import os
+import re
 import signal
 import threading
 import time
@@ -14,12 +15,19 @@ import ipaddress
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, quote
 
 from engine import FIELDS, Manager, connect
 from providers import ProviderStore
 
 ROOT = Path(__file__).resolve().parent
+
+
+def csv_disposition(ident, sources, favorites=False):
+    source=sources.get(ident,{})
+    name=('收藏夹' if favorites else '全部测试结果') if ident=='*' else source.get('task_name') or f"{source.get('provider_name','测试结果')}-{ident[:8]}"
+    name=re.sub(r'[\x00-\x1f\x7f<>:"/\\|?*]', '_',name).strip(' .')[:100].rstrip(' .') or '测试结果'
+    return 'attachment; filename="results.csv"; filename*=UTF-8\'\''+quote(name+'.csv',safe='')
 
 
 class LimitedHTTPServer(ThreadingHTTPServer):
@@ -162,7 +170,7 @@ def make_handler(manager, password, providers=None):
                     return
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/csv; charset=utf-8')
-                self.send_header('Content-Disposition', 'attachment; filename="results.csv"')
+                self.send_header('Content-Disposition', csv_disposition(ident,sources,favorites))
                 self.send_header('Cache-Control', 'no-store')
                 self.send_header('X-Content-Type-Options', 'nosniff')
                 self.end_headers()
