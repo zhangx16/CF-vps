@@ -139,6 +139,8 @@ def make_handler(manager, password, providers=None):
                     self.reply(200, (ROOT / 'static' / name).read_bytes(), kind)
                 elif parsed.path == '/api/jobs':
                     self.reply(200, manager.jobs())
+                elif parsed.path == '/api/job':
+                    self.reply(200,manager.job_detail(query.get('id',[''])[0]))
                 elif parsed.path == '/api/results':
                     self.reply(200, manager.results(query.get('id', [''])[0], query.get('view', ['hits'])[0],
                         region=query.get('region',[''])[0], colo=query.get('colo',[''])[0],

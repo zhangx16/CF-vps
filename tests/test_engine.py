@@ -117,6 +117,33 @@ class EngineTests(unittest.TestCase):
         for value in [None,{},'a'*61,'line\nname']:
             with self.assertRaises(ValueError):prepare({'targets':'8.8.8.8','task_name':value})
 
+    def test_task_detail_preserves_original_targets_and_legacy_snapshot(self):
+        text='8.8.8.0/30 # 测试网段\n8.8.8.1/32\n'
+        async def hit(ip,port,*args,**kwargs):
+            return dict(ip=ip,port=port,status='hit',verified='1',latency_ms=1)
+        with patch('engine.probe',hit):
+            ident=self.manager.start({'targets':text,'ports':'443','task_name':'输入快照'})
+            self.wait()
+        self.manager=Manager(self.manager.path)
+        detail=self.manager.job_detail(ident)
+        self.assertEqual(detail['target_text'],text)
+        self.assertEqual(detail['target_kind'],'original')
+        self.assertEqual(detail['networks'],['8.8.8.0/30'])
+        self.assertEqual(detail['ports'],[443])
+        self.assertNotIn('input_targets',self.manager.jobs()[0]['config'])
+        with patch('engine.probe',hit):
+            retest=self.manager.start(retest=ident)
+            self.wait()
+        self.assertEqual(self.manager.job_detail(retest)['kind'],'retest')
+        self.assertEqual(self.manager.job_detail(retest)['target_text'],text)
+        with connect(self.manager.path) as db:
+            row=db.execute('SELECT config FROM jobs WHERE id=?',(ident,)).fetchone()
+            config=json.loads(row['config']);config.pop('input_targets')
+            db.execute('UPDATE jobs SET config=? WHERE id=?',(json.dumps(config),ident))
+        self.assertEqual(self.manager.job_detail(ident)['target_kind'],'snapshot')
+        self.assertEqual(self.manager.job_detail(ident)['target_text'],'8.8.8.0/30')
+        with self.assertRaises(ValueError):self.manager.job_detail('missing')
+
     def test_failure_is_visible(self):
         async def fail(*args, **kwargs):
             raise RuntimeError('simulated failure')

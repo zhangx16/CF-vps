@@ -34,6 +34,7 @@ function updateContext(){
  get('delete-result-task').disabled=Boolean(job&&['running','stopping'].includes(job.status));
  if(center.active){get('results-title').textContent=center.favorites?'收藏夹':job?taskName(job):'全部测试结果';get('results-hint').textContent=center.favorites?'按 IP:端口收藏；相同地址与端口只显示一条最新记录。':job?`${timestamp(job.created)} · ${job.provider_name} · ${labels[job.status]||job.status} · 已测 ${job.done.toLocaleString()} · 命中 ${job.hits.toLocaleString()}。点击 IP:端口复制 IP。`:'汇总所有测试记录；选择左侧某次测试可单独查看结果。';}
  for(const b of get('center-task-nav').querySelectorAll('button')){const active=center.active&&!center.favorites&&b.dataset.job===id;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');}
+ renderTaskTargets();
  get('center-all-nav').classList.toggle('active',center.active&&!center.favorites&&id==='*');get('center-favorites-nav').classList.toggle('active',center.active&&center.favorites);
 }
 function fillJobs(value){get('catalog-job').replaceChildren();const all=document.createElement('option');all.value='*';all.textContent='全部测试';get('catalog-job').append(all);for(const j of center.jobs){if(get('catalog-provider').value&&j.provider!==get('catalog-provider').value)continue;const o=document.createElement('option');o.value=j.id;o.textContent=`${taskName(j)} · ${timestamp(j.created)} · ${labels[j.status]}`;get('catalog-job').append(o);}if([...get('catalog-job').options].some(o=>o.value===value))get('catalog-job').value=value;}

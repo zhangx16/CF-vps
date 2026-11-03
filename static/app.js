@@ -110,6 +110,7 @@ async function refresh() {
     if(window.resultCenter)await window.resultCenter.refreshMeta();
     if(resultId()) { const id=resultId(),view=$('view').value,provider=resultProvider();const facets=await api('/api/facets?'+new URLSearchParams({id,view,provider,favorites:window.resultCenter?.favorites?'1':''}));
       if(id===resultId()&&view===$('view').value){options($('region'),facets.regions,'全部地区',regionName);options($('colo'),facets.colos,'全部机房');if(window.resultCenter?.pendingRegion){$('region').value=window.resultCenter.pendingRegion;window.resultCenter.pendingRegion='';}} }
+    await renderTaskTargets();
     await renderResults();
   } catch(e){message(e);}finally{polling=false;}
 }
@@ -202,3 +203,14 @@ $('node-region-filter').onchange=()=>{$('node-saved-template').value='';$('node-
 $('node-saved-template').onchange=()=>{const n=nodeTemplates.find(n=>n.id===$('node-saved-template').value);$('node-template').value=n?.link||'';invalidateNodeOutput();};
 $('node-template').addEventListener('input',()=>{$('node-saved-template').value='';invalidateNodeOutput();});
 $('node-export-dialog').addEventListener('close',()=>{$('node-saved-template').value='';});
+
+let targetDetail=null,targetDetailId='',targetDetailVersion=0;
+async function renderTaskTargets(){
+ const id=resultId(),box=$('task-targets');if(!id||id==='*'){box.hidden=true;targetDetail=null;targetDetailId='';targetDetailVersion++;return;}
+ box.hidden=false;if(targetDetailId===id)return;const version=++targetDetailVersion;targetDetailId=id;targetDetail=null;$('task-targets-text').value='';$('task-targets-meta').textContent='正在读取任务目标快照…';$('task-targets-status').textContent='';$('task-targets-note').textContent='';$('copy-task-targets').disabled=$('download-task-targets').disabled=true;
+ try{const detail=await api('/api/job?'+new URLSearchParams({id}));if(version!==targetDetailVersion||id!==resultId()){if(targetDetailId===id)targetDetailId='';return;}targetDetail=detail;$('task-targets-text').value=detail.target_text;$('task-targets-meta').textContent=`${detail.task_name||detail.provider_name} · ${detail.networks.length} 个合并后网段 · 端口 ${detail.ports.join(', ')} · ${detail.total.toLocaleString()} 次目标探测`;
+ $('task-targets-note').textContent=(detail.target_kind==='original'?'下方保留创建任务时输入或选定的网段文本，实际扫描会合并重叠网段。':'此任务未保存原始输入文本，下方显示创建时保存的网段快照。')+(detail.kind==='retest'?' 此任务为复测：这里展示继承的原任务网段，实际仅复测选中项或原任务命中项。':'');$('copy-task-targets').disabled=$('download-task-targets').disabled=!detail.target_text;
+ }catch(e){if(version===targetDetailVersion){targetDetailId='';$('task-targets-meta').textContent='读取任务网段失败';$('task-targets-status').textContent=e.message;}}
+}
+$('copy-task-targets').onclick=async()=>{if(!targetDetail)return;try{await navigator.clipboard.writeText(targetDetail.target_text);$('task-targets-status').textContent='已复制任务网段。';}catch{$('task-targets-text').focus();$('task-targets-text').select();$('task-targets-status').textContent='请按 Ctrl+C 复制选中的网段。';}};
+$('download-task-targets').onclick=()=>{if(!targetDetail)return;const name=(targetDetail.task_name||targetDetail.provider_name||'任务网段').replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g,'_').replace(/^[ .]+|[ .]+$/g,'').slice(0,100)||'任务网段';const url=URL.createObjectURL(new Blob([targetDetail.target_text],{type:'text/plain;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download=name+'-网段.txt';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};

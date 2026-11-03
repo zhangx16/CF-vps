@@ -81,6 +81,20 @@ class DashboardTests(unittest.TestCase):
         self.assertIn(b"'=FORMULA()", body)
         self.assertEqual(self.request('GET', '/api/export?id=missing')[0], 404)
 
+    def test_task_detail_requires_login_and_returns_saved_input(self):
+        self.assertEqual(self.request('GET','/api/job?id=missing',auth=False)[0],401)
+        self.assertEqual(self.request('GET','/api/job?id=missing')[0],400)
+        async def fake(ip,port,*args,**kwargs):
+            return dict(ip=ip,port=port,status='hit',verified='1',latency_ms=1)
+        original='8.8.8.8/32 # 原输入'
+        with patch('engine.probe',fake):
+            ident=self.manager.start({'targets':original,'ports':'443'})
+            self.manager.thread.join(5)
+        status,_,body=self.request('GET','/api/job?id='+ident)
+        self.assertEqual(status,200)
+        self.assertEqual(json.loads(body)['target_text'],original)
+        self.assertEqual(json.loads(body)['ports'],[443])
+
     def test_csv_filename_sanitization_and_global_scope(self):
         value=csv_disposition('job12345',{'job12345':{'task_name':'香港/测试:01\r\n"'}})
         self.assertNotIn('\r',value)

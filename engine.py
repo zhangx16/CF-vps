@@ -51,6 +51,7 @@ def prepare(raw):
     text = raw.get('targets', '')
     if not isinstance(text, str) or len(text.encode()) > 65536:
         raise ValueError('目标输入过长')
+    input_targets = text
     builtin = not text.strip()
     if builtin:
         text = (ROOT / 'dmit_prefixes.txt').read_text()
@@ -85,7 +86,7 @@ def prepare(raw):
     if total > 2_000_000:
         raise ValueError('单次任务最多 200 万个 IP:端口，请拆分网段')
     return dict(networks=[str(n) for n in nets], ports=ports, concurrency=concurrency,
-                timeout=timeout, attempts=attempts, rps=rps, total=total, kind='scan',task_name=task_name,adaptive=adaptive,min_concurrency=minimum,provider=raw.get('provider','dmit' if builtin else ''),provider_name=raw.get('provider_name','DMIT（内置快照）' if builtin else '自定义目标'),provider_asns=raw.get('provider_asns',[]),provider_updated_at=raw.get('provider_updated_at'),provider_country=raw.get('provider_country',''))
+                timeout=timeout, attempts=attempts, rps=rps, total=total, kind='scan',task_name=task_name,input_targets=input_targets,adaptive=adaptive,min_concurrency=minimum,provider=raw.get('provider','dmit' if builtin else ''),provider_name=raw.get('provider_name','DMIT（内置快照）' if builtin else '自定义目标'),provider_asns=raw.get('provider_asns',[]),provider_updated_at=raw.get('provider_updated_at'),provider_country=raw.get('provider_country',''))
 
 
 def targets(config):
@@ -175,6 +176,7 @@ class Manager:
         with self.lock:
             for row in rows:
                 row['config'] = self.source_config(json.loads(row['config']))
+                row['config'].pop('input_targets',None)
                 if row['id'] == self.active:
                     row.update(self.live)
                     if self.controller:
@@ -182,6 +184,20 @@ class Manager:
                     if self.stop_event.is_set():
                         row['status'] = 'stopping'
         return rows
+
+    def job_detail(self, ident):
+        with connect(self.path) as db:
+            row=db.execute('SELECT * FROM jobs WHERE id=?',(ident,)).fetchone()
+        if not row:
+            raise ValueError('任务不存在')
+        config=self.source_config(json.loads(row['config']))
+        original=config.get('input_targets')
+        has_original=isinstance(original,str) and bool(original.strip())
+        return dict(id=row['id'],created=row['created'],status=row['status'],total=row['total'],
+                    task_name=config.get('task_name',''),provider_name=config.get('provider_name','自定义目标'),
+                    target_text=original if has_original else '\n'.join(config.get('networks',[])),
+                    target_kind='original' if has_original else 'snapshot',networks=config.get('networks',[]),
+                    ports=config.get('ports',[]),kind=config.get('kind','scan'),source_id=config.get('source_id',''))
 
     def source_config(self,config):
         config=dict(config)
