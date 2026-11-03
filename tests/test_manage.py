@@ -183,6 +183,21 @@ class ManagementTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT id FROM jobs').fetchone()[0],'checkpoint-job')
         self.assertFalse(manage.PREVIOUS.exists())
 
+    def test_certificate_failure_has_recovery_instructions(self):
+        failure=subprocess.CalledProcessError(1,['certbot'])
+        with patch.object(manage,'run',side_effect=failure),contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(ValueError) as error:
+                manage.request_domain_certificate('scan.example.com')
+        self.assertIn('灰云',str(error.exception))
+        self.assertIn('cf-vps domain scan.example.com',str(error.exception))
+        self.assertIn('AAAA',str(error.exception))
+        self.assertIn('无需重装',str(error.exception))
+
+    def test_certificate_request_uses_existing_webroot(self):
+        with patch.object(manage,'run') as run,contextlib.redirect_stdout(io.StringIO()):
+            manage.request_domain_certificate('scan.example.com')
+        run.assert_called_once_with('certbot','certonly','--webroot','-w','/var/www/html','-d','scan.example.com','--non-interactive','--agree-tos','--register-unsafely-without-email')
+
     def test_domain_validation_precedes_side_effects(self):
         with patch.object(manage,'run') as run:
             with self.assertRaises(ValueError):manage.configure_domain('bad.example.com;touch /tmp/test')

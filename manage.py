@@ -426,6 +426,22 @@ def nginx_text(domain, port, tls):
     return text
 
 
+def request_domain_certificate(domain):
+    print('证书使用 HTTP-01 验证：域名须指向本机，公网 TCP 80 必须可达。')
+    print('若 Cloudflare 小橙云导致验证路径返回 403，请先改为仅 DNS（灰云），等待解析生效后重试。')
+    try:
+        run('certbot','certonly','--webroot','-w','/var/www/html','-d',domain,'--non-interactive','--agree-tos','--register-unsafely-without-email')
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(
+            '证书申请失败，扫描服务无需重装。请检查上方 Certbot 错误。\n'
+            '1. 若开启 Cloudflare 小橙云且验证被拦截，临时改为仅 DNS（灰云）。\n'
+            '2. 检查 A / AAAA 均指向此服务器；没有可用 IPv6 时移除错误 AAAA。\n'
+            '3. 放行公网 TCP 80 / 443，确保没有其他规则拦截 /.well-known/acme-challenge/。\n'
+            f'4. DNS 生效后重新执行：cf-vps domain {domain}\n'
+            '5. 详细日志：/var/log/letsencrypt/letsencrypt.log'
+        ) from exc
+
+
 def configure_domain(domain):
     require_install()
     domain = domain.lower().strip().rstrip('.')
@@ -453,7 +469,7 @@ def configure_domain(domain):
             enabled.symlink_to(available)
         run('nginx','-t')
         run('systemctl','reload','nginx')
-        run('certbot','certonly','--webroot','-w','/var/www/html','-d',domain,'--non-interactive','--agree-tos','--register-unsafely-without-email')
+        request_domain_certificate(domain)
         available.write_text(nginx_text(domain,port,True))
         run('nginx','-t')
         config.update(CFVPS_DOMAIN=domain,CFVPS_HOST='127.0.0.1',CFVPS_TRUST_PROXY='1')
@@ -477,6 +493,9 @@ def configure_domain(domain):
         run('systemctl','restart','cf-vps',check=False)
         raise
     print(f'HTTPS 已配置：https://{domain}；后端改为仅本机监听。')
+    print('如重新开启 Cloudflare 小橙云，SSL/TLS 请使用完全（严格）。')
+    print('续期仍使用 HTTP-01：验证路径必须保持公网可达，不得被 CF Access、WAF 或挑战规则拦截。')
+    print('重新开启代理后请执行 certbot renew --dry-run 验证自动续期；失败时调整验证路径规则或改用 DNS-01。')
 
 
 def list_backups():
