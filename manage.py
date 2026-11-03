@@ -426,6 +426,14 @@ def nginx_text(domain, port, tls):
     return text
 
 
+def prepare_acme_webroot(root=Path('/var/www/html')):
+    # mkdir(mode=...) alone is reduced by umask and does not fix existing 0700 dirs.
+    root=Path(root)
+    for directory in (root,root/'.well-known',root/'.well-known/acme-challenge'):
+        directory.mkdir(parents=True,exist_ok=True)
+        directory.chmod(0o755)
+
+
 def request_domain_certificate(domain):
     print('证书使用 HTTP-01 验证：域名须指向本机，公网 TCP 80 必须可达。')
     print('若 Cloudflare 小橙云导致验证路径返回 403，请先改为仅 DNS（灰云），等待解析生效后重试。')
@@ -461,7 +469,7 @@ def configure_domain(domain):
     previous_config = read_config()
     config = dict(previous_config)
     port = int(config.get('CFVPS_PORT','8787'))
-    Path('/var/www/html/.well-known/acme-challenge').mkdir(parents=True,exist_ok=True)
+    prepare_acme_webroot()
     cert = Path('/etc/letsencrypt/live') / domain / 'fullchain.pem'
     try:
         available.write_text(nginx_text(domain,port,cert.exists()))

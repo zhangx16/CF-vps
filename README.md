@@ -43,6 +43,8 @@ sudo cf-vps domain scan.example.com
 
 命令会申请证书、配置 HTTP 到 HTTPS 跳转、添加证书续期后的 Nginx 重载钩子，并让后端仅监听 `127.0.0.1`。Nginx 设置真实客户端地址，面板仅在本机代理连接且 `CFVPS_TRUST_PROXY=1` 时信任它。已存在的非 CF VPS 站点配置不会被覆盖。菜单中也有“配置域名与 HTTPS”。
 
+若 Nginx 日志显示验证文件 `Permission denied`，检查 `namei -l /var/www/html/.well-known/acme-challenge`。旧版在 `umask 077` 环境下可能创建 700 权限目录，可执行 `sudo chmod 755 /var/www/html/.well-known /var/www/html/.well-known/acme-challenge` 后重新运行域名命令。新版会显式修复 Webroot 及两层验证目录为 755，不依赖 umask；不需要递归放开整个网站或修改证书私钥权限。
+
 如果开启 Cloudflare 小橙云后证书申请出现 `unauthorized` / HTTP 403，先临时切换为“仅 DNS（灰云）”，确认 A / AAAA 指向本机、TCP 80/443 可访问，再重试同一条 `cf-vps domain 域名` 命令，无需重装。没有配置 IPv6 的服务器不要保留指向其他地址的 AAAA。日志中的 `tar: time stamp ... in the future` 是服务器时钟稍慢的警告，不代表安装失败；可用 `timedatectl status` 检查时间同步。
 
 证书签发成功后可重新开启小橙云，SSL/TLS 使用“完全（严格）”。自动续期仍需访问 `http://域名/.well-known/acme-challenge/`：不能被 Cloudflare Access、WAF 或机器人挑战拦截。重新开启代理后运行 `sudo certbot renew --dry-run` 验证续期；若仍被拦截，应调整该路径规则或另外配置 DNS-01（当前管理命令采用 HTTP-01）。暂时关闭小橙云只解决首次签发，不会自动解决未来的续期拦截。

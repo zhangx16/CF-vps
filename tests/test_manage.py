@@ -183,6 +183,20 @@ class ManagementTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT id FROM jobs').fetchone()[0],'checkpoint-job')
         self.assertFalse(manage.PREVIOUS.exists())
 
+    def test_acme_webroot_permissions_under_restrictive_umask(self):
+        root=Path(self.tmp.name)/'public-html'
+        previous=os.umask(0o077)
+        try:
+            manage.prepare_acme_webroot(root)
+            for directory in [root,root/'.well-known',root/'.well-known/acme-challenge']:
+                self.assertEqual(directory.stat().st_mode & 0o777,0o755)
+                directory.chmod(0o700)
+            manage.prepare_acme_webroot(root)
+            for directory in [root,root/'.well-known',root/'.well-known/acme-challenge']:
+                self.assertEqual(directory.stat().st_mode & 0o777,0o755)
+        finally:
+            os.umask(previous)
+
     def test_certificate_failure_has_recovery_instructions(self):
         failure=subprocess.CalledProcessError(1,['certbot'])
         with patch.object(manage,'run',side_effect=failure),contextlib.redirect_stdout(io.StringIO()):
