@@ -19,7 +19,6 @@ from urllib.parse import parse_qs, urlsplit, quote
 
 from engine import FIELDS, Manager, connect
 from providers import ProviderStore
-from geolocation import GeoLocator
 
 ROOT = Path(__file__).resolve().parent
 
@@ -86,8 +85,6 @@ def make_handler(manager, password, providers=None):
     expected = 'Basic ' + base64.b64encode(('admin:' + password).encode()).decode()
     guard = LoginGuard()
 
-    geolocator = GeoLocator(manager)
-
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             # Do not log query strings, headers or credentials.
@@ -145,9 +142,7 @@ def make_handler(manager, password, providers=None):
                 elif parsed.path == '/api/results':
                     self.reply(200, manager.results(query.get('id', [''])[0], query.get('view', ['hits'])[0],
                         region=query.get('region',[''])[0], colo=query.get('colo',[''])[0],
-                        search=query.get('search',[''])[0], sort=query.get('sort',['newest'])[0], cursor=query.get('cursor',[''])[0],provider=query.get('provider',[''])[0],favorites=query.get('favorites',[''])[0]=='1',ip_country=query.get('ip_country',[''])[0]))
-                elif parsed.path == '/api/geo-status':
-                    self.reply(200,geolocator.status())
+                        search=query.get('search',[''])[0], sort=query.get('sort',['newest'])[0], cursor=query.get('cursor',[''])[0],provider=query.get('provider',[''])[0],favorites=query.get('favorites',[''])[0]=='1'))
                 elif parsed.path == '/api/catalog':
                     self.reply(200,manager.catalog())
                 elif parsed.path == '/api/providers':
@@ -159,7 +154,7 @@ def make_handler(manager, password, providers=None):
                 elif parsed.path == '/api/compare':
                     self.reply(200, manager.compare(query.get('old',[''])[0], query.get('new',[''])[0], query.get('kind',['new'])[0]))
                 elif parsed.path == '/api/export':
-                    self.export(query.get('id', [''])[0], query.get('view', ['hits'])[0], query.get('region',[''])[0], query.get('colo',[''])[0], query.get('search',[''])[0],query.get('provider',[''])[0],query.get('favorites',[''])[0]=='1',query.get('ip_country',[''])[0])
+                    self.export(query.get('id', [''])[0], query.get('view', ['hits'])[0], query.get('region',[''])[0], query.get('colo',[''])[0], query.get('search',[''])[0],query.get('provider',[''])[0],query.get('favorites',[''])[0]=='1')
                 else:
                     self.reply(404, {'error': '未找到'})
             except (ValueError, TypeError) as exc:
@@ -167,8 +162,8 @@ def make_handler(manager, password, providers=None):
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
-        def export(self, ident, view, region='', colo='', search='',provider='',favorites=False,ip_country=''):
-            condition, args, sources = manager.selection_condition(ident,view,region,colo,search,provider,favorites,ip_country)
+        def export(self, ident, view, region='', colo='', search='',provider='',favorites=False):
+            condition, args, sources = manager.selection_condition(ident,view,region,colo,search,provider,favorites)
             with connect(manager.path,favorites=favorites) as db:
                 if ident!='*' and not db.execute('SELECT 1 FROM jobs WHERE id=?', (ident,)).fetchone():
                     self.reply(404, {'error': '任务不存在'})
@@ -193,7 +188,6 @@ def make_handler(manager, password, providers=None):
                         break
                     for row in rows:
                         data = json.loads(row['data'])
-                        manager.attach_ip_country(db,data)
                         data.setdefault('request_ms', data.get('latency_ms',''))
                         data.update(job_id=row['job'],task_name=sources.get(row['job'],{}).get('task_name',data.get('task_name','')),provider_name=sources.get(row['job'],{}).get('provider_name',data.get('provider_name','未知来源')))
                         # Remote headers must not become spreadsheet formulas.
@@ -250,8 +244,6 @@ def make_handler(manager, password, providers=None):
                         raise ValueError('缺少任务 ID')
                     manager.delete(ident)
                     self.reply(200, {'ok': True})
-                elif path == '/api/geo-enrich':
-                    self.reply(200,geolocator.enqueue(raw.get('ips')))
                 elif path == '/api/favorite':
                     self.reply(200,manager.favorite(raw.get('ip'),raw.get('port'),raw.get('enabled')))
                 elif path == '/api/stop':

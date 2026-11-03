@@ -14,7 +14,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 curl -fL --retry 3 --connect-timeout 15 --max-time 120 "https://api.github.com/repos/zhangx16/CF-vps/tarball/$REF" -o "$TMP_DIR/source.tar.gz"
 mkdir "$TMP_DIR/source"
 tar -xzf "$TMP_DIR/source.tar.gz" --strip-components=1 -C "$TMP_DIR/source"
-python3 -m py_compile "$TMP_DIR/source/server.py" "$TMP_DIR/source/engine.py" "$TMP_DIR/source/adaptive.py" "$TMP_DIR/source/providers.py" "$TMP_DIR/source/geolocation.py" "$TMP_DIR/source/probing.py" "$TMP_DIR/source/scan_dmit_cf_fallback.py" "$TMP_DIR/source/manage.py"
+python3 -m py_compile "$TMP_DIR/source/server.py" "$TMP_DIR/source/engine.py" "$TMP_DIR/source/adaptive.py" "$TMP_DIR/source/providers.py" "$TMP_DIR/source/probing.py" "$TMP_DIR/source/scan_dmit_cf_fallback.py" "$TMP_DIR/source/manage.py"
 VERSION=$(python3 - "$TMP_DIR/source.tar.gz" <<'PY'
 import sys,tarfile
 with tarfile.open(sys.argv[1]) as archive:
@@ -73,7 +73,7 @@ PYBACKUP
 fi
 NEW_RELEASE="/opt/cf-vps-releases/$(date +%Y%m%d-%H%M%S)-$RANDOM"
 install -d -m 755 "$NEW_RELEASE" "$NEW_RELEASE/static"
-for FILE in server.py engine.py adaptive.py providers.py geolocation.py probing.py scan_dmit_cf_fallback.py manage.py dmit_prefixes.txt; do
+for FILE in server.py engine.py adaptive.py providers.py probing.py scan_dmit_cf_fallback.py manage.py dmit_prefixes.txt; do
   install -m 644 "$TMP_DIR/source/$FILE" "$NEW_RELEASE/$FILE"
 done
 for FILE in index.html app.js providers.js center.js style.css fonts.css; do install -m 644 "$TMP_DIR/source/static/$FILE" "$NEW_RELEASE/static/$FILE"; done

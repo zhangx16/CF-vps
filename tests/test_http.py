@@ -81,33 +81,6 @@ class DashboardTests(unittest.TestCase):
         self.assertIn(b"'=FORMULA()", body)
         self.assertEqual(self.request('GET', '/api/export?id=missing')[0], 404)
 
-    def test_country_enrichment_auth_filters_and_csv(self):
-        from engine import connect
-        self.assertEqual(self.request('POST','/api/geo-enrich',{'ips':[]},auth=False)[0],401)
-        self.assertEqual(self.request('POST','/api/geo-enrich',{'ips':[]},csrf=False)[0],403)
-        self.assertEqual(self.request('POST','/api/geo-enrich',{'ips':['127.0.0.1']})[0],400)
-        self.assertEqual(self.request('POST','/api/geo-enrich',{'ips':['9.9.9.9']})[0],400)
-        async def fake(ip,port,*args,**kwargs):
-            return dict(ip=ip,port=port,status='hit',verified='1',evidence='dual_verified',loc='CA')
-        with patch('engine.probe',fake):
-            ident=self.manager.start({'targets':'8.8.8.8','ports':'443'})
-            self.manager.thread.join(5)
-        import time
-        with connect(self.manager.path) as db:
-            db.execute('INSERT INTO geo_cache VALUES (?,?,?,?,?,?)',('8.8.8.8','HK','fixture',1,time.time()+60,''))
-        with patch('geolocation.lookup_geoip',side_effect=AssertionError('cached lookup should not run')):
-            self.assertEqual(self.request('POST','/api/geo-enrich',{'ips':['8.8.8.8']})[0],200)
-        status,_,body=self.request('GET',f'/api/results?id={ident}&ip_country=HK')
-        self.assertEqual(json.loads(body)['items'][0]['ip_country'],'HK')
-        self.assertEqual(json.loads(body)['items'][0]['loc'],'CA')
-        self.assertEqual(json.loads(self.request('GET',f'/api/results?id={ident}&ip_country=US')[2])['total'],0)
-        status,_,body=self.request('GET',f'/api/export?id={ident}&ip_country=HK')
-        self.assertEqual(status,200)
-        self.assertIn(b'ip_country_source',body)
-        self.assertIn(b'fixture',body)
-        self.assertNotIn(b'8.8.8.8',self.request('GET',f'/api/export?id={ident}&ip_country=US')[2])
-        self.assertEqual(self.request('GET','/api/geo-status')[0],200)
-
     def test_csv_filename_sanitization_and_global_scope(self):
         value=csv_disposition('job12345',{'job12345':{'task_name':'香港/测试:01\r\n"'}})
         self.assertNotIn('\r',value)
