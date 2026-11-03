@@ -2,6 +2,7 @@
 """Root-only cf-vps terminal manager. No third-party dependencies."""
 import argparse
 import datetime
+import errno
 import fcntl
 import getpass
 import ipaddress
@@ -121,6 +122,18 @@ def info(show_password=False):
         print('密码：' + config.get('CFVPS_PASSWORD', '未设置'))
 
 
+def require_backup_space(snapshot_bytes=0):
+    free=shutil.disk_usage(BACKUPS).free
+    reserve=16*1024*1024
+    if free < snapshot_bytes+reserve:
+        raise ValueError(f'备份目录 {BACKUPS} 可用空间不足：剩余 {free/1024**2:.1f} MiB，'
+                         f'未压缩数据库快照约 {snapshot_bytes/1024**2:.1f} MiB，另需压缩归档空间。'
+                         '请检查 df -h /var/backups/cf-vps 和 df -i /var/backups/cf-vps；'
+                         '释放空间或扩容后重试，不要删除 /var/lib/cf-vps/scan.db。')
+    if os.statvfs(BACKUPS).f_favail < 8:
+        raise ValueError(f'备份目录 {BACKUPS} 的可用 inode 不足，请检查 df -i 后重试。')
+
+
 def backup(quiet=False):
     if not CONFIG.exists():
         raise ValueError('没有可备份的配置')
@@ -128,16 +141,24 @@ def backup(quiet=False):
     os.chmod(BACKUPS, 0o700)
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     output = BACKUPS / f'cf-vps-{stamp}.tar.gz'
-    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    os.close(fd)
+    created=False
     try:
-        with tempfile.TemporaryDirectory() as tmp:
+        require_backup_space()
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        created=True
+        os.close(fd)
+        # /tmp is often a small tmpfs. Keep the uncompressed snapshot on the
+        # backup filesystem, including when TMPDIR points to a small RAM disk.
+        with tempfile.TemporaryDirectory(prefix='.snapshot-',dir=BACKUPS) as tmp:
             tmp = Path(tmp)
             source = data_dir() / 'scan.db'
             if source.exists():
                 # SQLite's backup API includes committed WAL records without stopping scans.
-                with closing(sqlite3.connect(source, timeout=30)) as src, closing(sqlite3.connect(tmp / 'scan.db')) as dest:
-                    src.backup(dest, pages=256, sleep=0.1)
+                with closing(sqlite3.connect(source, timeout=30)) as src:
+                    estimated=src.execute('PRAGMA page_count').fetchone()[0]*src.execute('PRAGMA page_size').fetchone()[0]
+                    require_backup_space(estimated)
+                    with closing(sqlite3.connect(tmp / 'scan.db')) as dest:
+                        src.backup(dest, pages=256, sleep=0.1)
             shutil.copyfile(CONFIG, tmp / 'cf-vps.env')
             if (data_dir()/'providers.json').exists():
                 shutil.copyfile(data_dir()/'providers.json',tmp/'providers.json')
@@ -145,8 +166,13 @@ def backup(quiet=False):
             with tarfile.open(output, 'w:gz') as archive:
                 for path in tmp.iterdir():
                     archive.add(path, arcname=path.name, recursive=False)
-    except BaseException:
-        output.unlink(missing_ok=True)
+    except BaseException as exc:
+        if created:
+            output.unlink(missing_ok=True)
+        if (isinstance(exc,OSError) and exc.errno in (errno.ENOSPC,errno.EDQUOT)) or (isinstance(exc,sqlite3.OperationalError) and ('disk is full' in str(exc).lower() or 'database or disk is full' in str(exc).lower())):
+            raise ValueError(f'备份失败：{BACKUPS} 所在分区空间、inode 或配额不足。'
+                             '请运行 df -h /var/backups/cf-vps 与 df -i /var/backups/cf-vps 检查。'
+                             '未完成的本次备份已清理，原数据库和旧备份保留；释放空间或扩容后再升级。') from exc
         raise
     prune_backups()
     if not quiet:

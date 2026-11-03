@@ -217,3 +217,5 @@ python3 scan_dmit_cf_fallback.py --ip 你的已授权IP --ports 443 --output hit
 CSV 下载文件名使用当前任务名称；未命名任务使用来源名称与任务 ID 前缀。跨任务导出命名为“全部测试结果.csv”，全局收藏夹为“收藏夹.csv”。文件名中的路径字符和控制字符会替换，中文名称保留。
 
 选择具体测试任务后，结果页的“任务输入 IP / 网段”可展开查看、复制或下载创建时的目标文本，并显示合并后网段数、端口和目标探测次数。新任务保留原输入文本；旧任务和内置网段任务展示当时保存的网段快照，不读取服务商最新网段替换历史记录。复测任务明确标注展示的是继承的原任务网段，实际复测范围为选中项或原任务命中项。
+
+升级或备份报 `sqlite3.OperationalError: database or disk is full` 时，先执行 `df -h / /tmp /var/backups/cf-vps`、`df -i / /tmp /var/backups/cf-vps` 和 `du -sh /var/lib/cf-vps /var/backups/cf-vps`。旧版先在临时目录创建未压缩数据库快照，`/tmp` 是较小 tmpfs 时可能先耗尽内存盘空间；若磁盘空间充足，可用 `TMPDIR=/var/tmp cf-vps upgrade` 临时绕过。新版将快照放在受限权限的备份目录内，检查空间和 inode，备份失败时清理本次未完成文件，保留原数据和旧备份。目标分区仍需能容纳未压缩快照、压缩归档和至少 16 MiB 余量；空间确实不足时先释放空间或扩容，不要删除 `scan.db`，也不要跳过升级前备份。

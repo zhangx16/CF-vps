@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import io
 import os
 import sqlite3
@@ -75,6 +76,48 @@ class ManagementTests(unittest.TestCase):
         with sqlite3.connect(restored) as db:
             self.assertEqual(db.execute('SELECT ip FROM results').fetchone()[0], '8.8.8.8')
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 1)
+
+    def test_backup_snapshot_uses_backup_directory_instead_of_tmpdir(self):
+        original=manage.tempfile.TemporaryDirectory
+        locations=[]
+        def temporary(*args,**kwargs):
+            locations.append(Path(kwargs['dir']))
+            return original(*args,**kwargs)
+        with patch.object(manage.tempfile,'TemporaryDirectory',side_effect=temporary),patch.dict(os.environ,{'TMPDIR':'/does-not-exist-full-tmpfs'}):
+            archive=manage.backup(quiet=True)
+        self.assertEqual(locations,[self.backups])
+        self.assertTrue(archive.exists())
+        self.assertFalse(list(self.backups.glob('.snapshot-*')))
+
+    def test_backup_space_preflight_preserves_database_and_old_backups(self):
+        old=manage.backup(quiet=True)
+        with patch.object(manage.shutil,'disk_usage',return_value=types.SimpleNamespace(free=0)):
+            with self.assertRaisesRegex(ValueError,'可用空间不足'):manage.backup(quiet=True)
+        self.assertEqual(list(self.backups.glob('*.tar.gz')),[old])
+        self.assertEqual(self.db.execute('SELECT id FROM jobs').fetchone()[0],'checkpoint-job')
+
+    def test_full_disk_during_archive_cleans_only_incomplete_backup(self):
+        old=manage.backup(quiet=True)
+        with patch.object(manage.tarfile,'open',side_effect=OSError(errno.ENOSPC,'No space left on device')):
+            with self.assertRaisesRegex(ValueError,'原数据库和旧备份保留'):manage.backup(quiet=True)
+        self.assertEqual(list(self.backups.glob('*.tar.gz')),[old])
+        self.assertFalse(list(self.backups.glob('.snapshot-*')))
+        self.assertEqual(self.db.execute('SELECT id FROM jobs').fetchone()[0],'checkpoint-job')
+
+    def test_sqlite_full_error_is_actionable_and_cleans_temp_snapshot(self):
+        original_connect=manage.sqlite3.connect
+        class FailingBackup:
+            def __init__(self,connection):self.connection=connection
+            def __getattr__(self,name):return getattr(self.connection,name)
+            def backup(self,*args,**kwargs):raise sqlite3.OperationalError('database or disk is full')
+        def connect(path,*args,**kwargs):
+            connection=original_connect(path,*args,**kwargs)
+            return FailingBackup(connection) if Path(path)==self.data/'scan.db' else connection
+        with patch.object(manage.sqlite3,'connect',side_effect=connect):
+            with self.assertRaisesRegex(ValueError,'空间、inode 或配额不足'):manage.backup(quiet=True)
+        self.assertFalse(list(self.backups.glob('*.tar.gz')))
+        self.assertFalse(list(self.backups.glob('.snapshot-*')))
+        self.assertEqual(self.db.execute('SELECT id FROM jobs').fetchone()[0],'checkpoint-job')
 
     def test_public_and_port_keep_credentials(self):
         before = manage.read_config()
