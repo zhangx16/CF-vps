@@ -156,7 +156,7 @@ def make_handler(manager, password, providers=None):
 
         def export(self, ident, view, region='', colo='', search='',provider='',favorites=False):
             condition, args, sources = manager.selection_condition(ident,view,region,colo,search,provider,favorites)
-            with connect(manager.path) as db:
+            with connect(manager.path,favorites=favorites) as db:
                 if ident!='*' and not db.execute('SELECT 1 FROM jobs WHERE id=?', (ident,)).fetchone():
                     self.reply(404, {'error': '任务不存在'})
                     return
@@ -172,7 +172,7 @@ def make_handler(manager, password, providers=None):
                 writer.writeheader()
                 self.wfile.write(buf.getvalue().encode())
                 # Short paginated reads avoid holding a WAL snapshot during a slow download.
-                cursor = 0
+                cursor = -9223372036854775808 if favorites else 0
                 maximum = db.execute(f'SELECT COALESCE(MAX(rowid),0) FROM results WHERE {condition}', args).fetchone()[0]
                 while True:
                     rows = db.execute(f'SELECT rowid,job,data FROM results WHERE {condition} AND rowid>? AND rowid<=? ORDER BY rowid LIMIT 200', args + [cursor, maximum]).fetchall()
@@ -181,7 +181,7 @@ def make_handler(manager, password, providers=None):
                     for row in rows:
                         data = json.loads(row['data'])
                         data.setdefault('request_ms', data.get('latency_ms',''))
-                        data.update(job_id=row['job'],task_name=sources.get(row['job'],{}).get('task_name',''),provider_name=sources.get(row['job'],{}).get('provider_name','未知来源'))
+                        data.update(job_id=row['job'],task_name=sources.get(row['job'],{}).get('task_name',data.get('task_name','')),provider_name=sources.get(row['job'],{}).get('provider_name',data.get('provider_name','未知来源')))
                         # Remote headers must not become spreadsheet formulas.
                         for key, value in data.items():
                             if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@')):
@@ -237,7 +237,7 @@ def make_handler(manager, password, providers=None):
                     manager.delete(ident)
                     self.reply(200, {'ok': True})
                 elif path == '/api/favorite':
-                    self.reply(200,manager.favorite(raw.get('ip'),raw.get('enabled')))
+                    self.reply(200,manager.favorite(raw.get('ip'),raw.get('port'),raw.get('enabled')))
                 elif path == '/api/stop':
                     manager.stop()
                     self.reply(200, {'ok': True})

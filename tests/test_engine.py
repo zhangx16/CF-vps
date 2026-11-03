@@ -31,6 +31,14 @@ class EngineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 prepare(raw)
 
+    def test_concurrency_upper_bound(self):
+        for value in [300,301,1000]:
+            config=prepare({'targets':'8.8.8.8','concurrency':value,'min_concurrency':1000})
+            self.assertEqual(config['concurrency'],value)
+            self.assertEqual(config['min_concurrency'],value)
+        for value in [0,1001]:
+            with self.assertRaises(ValueError):prepare({'targets':'8.8.8.8','concurrency':value})
+
     def test_stop_resume_skips_nonhits_and_recovers_restart(self):
         calls = []
         async def fake(ip, port, timeout, sem, **kwargs):
@@ -69,21 +77,25 @@ class EngineTests(unittest.TestCase):
             for _ in range(2):
                 ids.append(self.manager.start({'targets':'8.8.8.8','ports':'443,8443'}))
                 self.wait()
-        self.manager.favorite('8.8.8.8',True)
-        self.manager.favorite('8.8.8.8',True)
+        self.manager.favorite('8.8.8.8',443,True)
+        self.manager.favorite('8.8.8.8',443,True)
         self.manager=Manager(self.manager.path)
         rows=self.manager.results('*','all',favorites=True)
-        self.assertEqual(rows['total'],4)
+        self.assertEqual(rows['total'],1)
+        self.assertEqual(rows['items'][0]['port'],443)
+        self.assertFalse(next(r for r in self.manager.results(ids[0],'all')['items'] if r['port']==8443)['favorite'])
         self.assertTrue(all(r['favorite'] for r in rows['items']))
-        self.assertEqual(sum(r['count'] for r in self.manager.facets('*','all',favorites=True)['regions']),4)
+        self.assertEqual(sum(r['count'] for r in self.manager.facets('*','all',favorites=True)['regions']),1)
         self.manager.delete(ids[0])
-        self.assertEqual(self.manager.results('*','all',favorites=True)['total'],2)
-        self.manager.favorite('8.8.8.8',False)
+        self.assertEqual(self.manager.results('*','all',favorites=True)['total'],1)
+        self.manager.delete(ids[1])
+        self.assertEqual(self.manager.results('*','all',favorites=True)['total'],1)
+        self.manager.favorite('8.8.8.8',443,False)
         self.assertEqual(self.manager.results('*','all',favorites=True)['total'],0)
         self.assertTrue(all(not r['favorite'] for r in self.manager.results('*','all')['items']))
         for ip,enabled in [('127.0.0.1',True),('invalid',True),('8.8.8.8','true')]:
             with self.assertRaises(ValueError):
-                self.manager.favorite(ip,enabled)
+                self.manager.favorite(ip,443,enabled)
 
     def test_named_task_persists_in_results_catalog_and_resume(self):
         async def hit(ip,port,timeout,sem,**kwargs):

@@ -28,9 +28,13 @@ def open_db(path):
 
 
 @contextmanager
-def connect(path):
+def connect(path, favorites=False):
     db = open_db(path)
     try:
+        if favorites:
+            columns=[r['name'] for r in db.execute('PRAGMA main.table_info(results)')]
+            names=','.join(columns)
+            db.execute(f'CREATE TEMP VIEW results AS SELECT rowid,{names} FROM main.results UNION ALL SELECT -saved_rowid AS rowid,{names} FROM main.favorite_snapshots')
         with db:
             yield db
     finally:
@@ -73,8 +77,8 @@ def prepare(raw):
     if not isinstance(adaptive,bool):
         raise ValueError('自适应并发必须是布尔值')
     minimum = max(1,min(int(raw.get('min_concurrency',10)),concurrency))
-    if not 1 <= concurrency <= 300 or not math.isfinite(timeout) or not 0.5 <= timeout <= 30 or not 1 <= attempts <= 3:
-        raise ValueError('并发 1–300，超时 0.5–30 秒，尝试次数 1–3')
+    if not 1 <= concurrency <= 1000 or not math.isfinite(timeout) or not 0.5 <= timeout <= 30 or not 1 <= attempts <= 3:
+        raise ValueError('并发 1–1000，超时 0.5–30 秒，尝试次数 1–3')
     if not math.isfinite(rps) or not 1 <= rps <= 1000:
         raise ValueError('每秒请求上限应在 1–1000')
     total = sum(n.num_addresses if n.prefixlen >= 31 else n.num_addresses - 2 for n in nets) * len(ports)
@@ -126,6 +130,7 @@ class Manager:
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS favorites (ip TEXT PRIMARY KEY, created REAL);
+                CREATE TABLE IF NOT EXISTS endpoint_favorites (ip TEXT, port INTEGER, created REAL, PRIMARY KEY(ip,port));
                 CREATE TABLE IF NOT EXISTS jobs (
                   id TEXT PRIMARY KEY, created REAL, updated REAL, status TEXT,
                   config TEXT, total INTEGER, done INTEGER DEFAULT 0,
@@ -143,6 +148,7 @@ class Manager:
             for name, kind in [('evidence','TEXT'), ('colo','TEXT'), ('loc','TEXT'), ('observed','REAL'), ('ip_num','INTEGER')]:
                 if name not in columns:
                     db.execute(f'ALTER TABLE results ADD COLUMN {name} {kind}')
+            db.execute('CREATE TABLE IF NOT EXISTS favorite_snapshots AS SELECT rowid AS saved_rowid,* FROM results WHERE 0')
             # Old results keep their original meaning; do not relabel them as strict verification.
             reader = db.execute('SELECT rowid,ip,data FROM results WHERE evidence IS NULL')
             while True:
@@ -158,6 +164,7 @@ class Manager:
                 CREATE INDEX IF NOT EXISTS result_region ON results(job,loc);
                 CREATE INDEX IF NOT EXISTS result_latency ON results(job,latency);
                 CREATE INDEX IF NOT EXISTS result_job ON results(job);
+                CREATE INDEX IF NOT EXISTS result_endpoint ON results(ip,port);
                 CREATE INDEX IF NOT EXISTS result_global_status ON results(status,loc);
             ''')
             db.execute("UPDATE jobs SET status='interrupted', updated=? WHERE status IN ('running','stopping')", (time.time(),))
@@ -203,20 +210,29 @@ class Manager:
             group['records']+=job['done'];group['hits']+=job['hits'];group['jobs']+=1
         return dict(jobs=jobs,providers=list(groups.values()))
 
-    def favorite(self, ip, enabled):
+    def favorite(self, ip, port, enabled):
         try:
             address = ipaddress.ip_address(ip)
         except (ValueError, TypeError):
             raise ValueError('IP 无效')
-        if address.version != 4 or not address.is_global or not isinstance(enabled, bool):
-            raise ValueError('需要公网 IPv4 和布尔收藏状态')
+        if address.version != 4 or not address.is_global or not isinstance(enabled, bool) or type(port) is not int or not 1<=port<=65535:
+            raise ValueError('需要公网 IPv4、有效端口和布尔收藏状态')
         ip = str(address)
         with connect(self.path) as db:
             if enabled:
-                db.execute('INSERT OR IGNORE INTO favorites(ip,created) VALUES (?,?)',(ip,time.time()))
+                db.execute('INSERT OR IGNORE INTO endpoint_favorites(ip,port,created) VALUES (?,?,?)',(ip,port,time.time()))
+                db.execute('DELETE FROM favorite_snapshots WHERE ip=? AND port=?',(ip,port))
+                db.execute('INSERT INTO favorite_snapshots SELECT rowid,* FROM results WHERE ip=? AND port=? ORDER BY rowid DESC LIMIT 1',(ip,port))
+                snapshot=db.execute('SELECT saved_rowid,job,data FROM favorite_snapshots WHERE ip=? AND port=?',(ip,port)).fetchone()
+                if snapshot:
+                    data=json.loads(snapshot['data'])
+                    source=self.job_sources().get(snapshot['job'],{})
+                    data.update(task_name=source.get('task_name',data.get('task_name','')),provider_name=source.get('provider_name',data.get('provider_name','未知来源')),job_created=source.get('created',data.get('job_created')))
+                    db.execute('UPDATE favorite_snapshots SET data=? WHERE saved_rowid=?',(json.dumps(data),snapshot['saved_rowid']))
             else:
-                db.execute('DELETE FROM favorites WHERE ip=?',(ip,))
-        return dict(ip=ip,favorite=enabled)
+                db.execute('DELETE FROM endpoint_favorites WHERE ip=? AND port=?',(ip,port))
+                db.execute('DELETE FROM favorite_snapshots WHERE ip=? AND port=?',(ip,port))
+        return dict(ip=ip,port=port,favorite=enabled)
 
     def selection_condition(self,ident,view='hits',region='',colo='',search='',provider='',favorites=False):
         condition,args=self.condition(ident,view,region,colo,search)
@@ -228,7 +244,7 @@ class Manager:
         elif ident=='*':
             condition='1=1'+condition[len('job=?'):];args=args[1:]
         if favorites:
-            condition += ' AND ip IN (SELECT ip FROM favorites)'
+            condition += ' AND (ip,port) IN (SELECT ip,port FROM endpoint_favorites) AND rowid IN (SELECT MAX(rowid) FROM results GROUP BY ip,port)'
         return condition,args,sources
 
     def start(self, raw=None, resume=None, retest=None):
@@ -418,7 +434,7 @@ class Manager:
 
     def facets(self, ident, view='hits',provider='',favorites=False):
         condition, args, _ = self.selection_condition(ident,view,provider=provider,favorites=favorites)
-        with connect(self.path) as db:
+        with connect(self.path,favorites=favorites) as db:
             regions = [dict(r) for r in db.execute(f"SELECT COALESCE(NULLIF(loc,''),'UNKNOWN') AS value,COUNT(*) AS count FROM results WHERE {condition} GROUP BY value ORDER BY count DESC",args)]
             colos = [dict(r) for r in db.execute(f"SELECT colo AS value,COUNT(*) AS count FROM results WHERE {condition} AND colo!='' GROUP BY colo ORDER BY count DESC",args)]
         return dict(regions=regions,colos=colos)
@@ -433,7 +449,7 @@ class Manager:
             raise ValueError('排序无效')
         key, direction = choices[sort]
         condition, args, sources = self.selection_condition(ident,view,region,colo,search,provider,favorites)
-        with connect(self.path) as db:
+        with connect(self.path,favorites=favorites) as db:
             total = db.execute(f'SELECT COUNT(*) FROM results WHERE {condition}',args).fetchone()[0]
             where, values = condition, list(args)
             if cursor:
@@ -456,9 +472,9 @@ class Manager:
                 data = json.loads(row['data'])
                 history = db.execute('SELECT MIN(CASE WHEN hit=1 THEN observed END) AS first_seen,MAX(CASE WHEN confirmed=1 THEN observed END) AS last_confirmed,COUNT(*) AS checks,COALESCE(SUM(hit),0) AS successes,COALESCE(SUM(confirmed),0) AS confirmations FROM observations WHERE ip=? AND port=?',(data['ip'],data['port'])).fetchone()
                 data['history'] = dict(history)
-                data['favorite'] = db.execute('SELECT 1 FROM favorites WHERE ip=?',(data['ip'],)).fetchone() is not None
+                data['favorite'] = db.execute('SELECT 1 FROM endpoint_favorites WHERE ip=? AND port=?',(data['ip'],data['port'])).fetchone() is not None
                 source=sources.get(row['job'],{})
-                data.update(job_id=row['job'],task_name=source.get('task_name',''),provider_name=source.get('provider_name','未知来源'),job_created=source.get('created'))
+                data.update(job_id=row['job'],task_name=source.get('task_name',data.get('task_name','')),provider_name=source.get('provider_name',data.get('provider_name','未知来源')),job_created=source.get('created',data.get('job_created')))
                 items.append(data)
             next_cursor = ''
             if more:
