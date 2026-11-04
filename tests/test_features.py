@@ -110,15 +110,16 @@ class HistoryTests(unittest.TestCase):
         result=self.manager.compare(old,new)
         self.assertEqual(result['counts'],{'new':1,'lost':1,'persistent':2})
         self.assertEqual(result['items'][0]['ip'],'8.8.8.4')
-        row=self.manager.results(new,search='8.8.8.1',view='all')['items'][0]
-        self.assertEqual((row['history']['checks'],row['history']['successes']),(2,1))
+        self.assertEqual(self.manager.results(new,search='8.8.8.1',view='all')['total'],0)
+        row=self.manager.results(old,search='8.8.8.1')['items'][0]
+        self.assertEqual((row['history']['checks'],row['history']['successes']),(1,1))
         async def fake(ip,port,*args,**kwargs):
             return dict(ip=ip,port=port,status='hit',evidence='dual_verified',verified='1',request_ms=10)
         with patch('engine.probe',fake):
-            ident=self.manager.start({'selected':[{'ip':'8.8.8.1','port':443}]},retest=new)
+            ident=self.manager.start({'selected':[{'ip':'8.8.8.1','port':443}]},retest=old)
             self.manager.thread.join(5)
         row=self.manager.results(ident)['items'][0]
-        self.assertEqual((row['history']['checks'],row['history']['successes']),(3,2))
+        self.assertEqual((row['history']['checks'],row['history']['successes']),(2,2))
         self.assertIsNotNone(row['history']['last_confirmed'])
         self.manager.delete(old)
         self.assertEqual(self.manager.results(old,view='all')['total'],0)
@@ -158,7 +159,7 @@ class HistoryTests(unittest.TestCase):
     def test_cross_task_catalog_groups_and_searches_by_provider(self):
         first=self.run_job({1,2,3})
         second=self.run_job({1,2},{'targets':'8.8.8.0/30','ports':'443','provider':'vultr','provider_name':'Vultr','provider_asns':[20473]})
-        self.assertEqual(self.manager.results('*',view='all')['total'],8)
+        self.assertEqual(self.manager.results('*',view='all')['total'],5)
         matches=self.manager.results('*',view='all',provider='vultr',search='8.8.8.1')
         self.assertEqual(matches['total'],1)
         self.assertEqual(matches['items'][0]['job_id'],second)

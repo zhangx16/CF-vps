@@ -169,6 +169,19 @@ class Manager:
                 CREATE INDEX IF NOT EXISTS result_global_status ON results(status,loc);
             ''')
             db.execute("UPDATE jobs SET status='interrupted', updated=? WHERE status IN ('running','stopping')", (time.time(),))
+        self.prune_completed_nonhits()
+
+    def prune_completed_nonhits(self, ident=None):
+        """Remove failure payloads/checkpoints only after a task is complete."""
+        with connect(self.path) as db:
+            ids=[r['id'] for r in db.execute("SELECT id FROM jobs WHERE status='completed'"+(' AND id=?' if ident else ''), (ident,) if ident else ())]
+        for job in ids:
+            for table,condition in [('results',"status!='hit' OR status IS NULL"),('observations','hit=0')]:
+                while True:
+                    with connect(self.path) as db:
+                        changed=db.execute(f'DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE job=? AND ({condition}) LIMIT 2000)',(job,)).rowcount
+                    if changed<2000:
+                        break
 
     def jobs(self):
         with connect(self.path) as db:
@@ -415,6 +428,8 @@ class Manager:
             status = 'completed' if done == config['total'] else 'stopped'
             db.execute('UPDATE jobs SET status=?,updated=? WHERE id=?', (status,time.time(),ident))
             db.commit()
+            if status == 'completed':
+                self.prune_completed_nonhits(ident)
         except BaseException:
             for task in tasks:
                 task.cancel()

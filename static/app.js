@@ -93,7 +93,7 @@ async function renderResults() {
     tick.onchange=()=>{if(tick.checked)checked.set(key,{ip:r.ip,port:r.port});else checked.delete(key);selectionState();};
     let td=document.createElement('td');td.append(tick);tr.append(td);td=document.createElement('td');td.append(favoriteButton(r),ipButton(r.ip,r.port));tr.append(td);td=document.createElement('td');td.className='catalog-column';td.textContent=r.provider_name||'未知来源';tr.append(td);
     const h=r.history||{},ms=r.request_ms??r.latency_ms;
-    const values=[levels[r.evidence]||labels[r.status]||r.status,verifications[r.verification]||(r.verified==='1'?'旧版确认':'—'),ms===''||ms==null?'—':`${ms} ms`,r.colo||'—',regionName(r.loc),timestamp(h.first_seen),timestamp(h.last_confirmed),h.checks?`${(h.successes/h.checks*100).toFixed(0)}% (${h.successes}/${h.checks})`:'—',errors[r.error_kind]||errors[r.verify_error]||r.err||r.server||'—'];
+    const values=[levels[r.evidence]||labels[r.status]||r.status,verifications[r.verification]||(r.verified==='1'?'旧版确认':'—'),ms===''||ms==null?'—':`${ms} ms`,r.colo||'—',regionName(r.loc),timestamp(h.first_seen),timestamp(h.last_confirmed),h.successes?`${h.successes} 次命中 / ${h.confirmations||0} 次双域名确认`:'—',errors[r.error_kind]||errors[r.verify_error]||r.err||r.server||'—'];
     for(const value of values){const cell=document.createElement('td');cell.textContent=value;tr.append(cell);}
     const jobCell=document.createElement('td');jobCell.className='catalog-column';jobCell.textContent=(r.task_name?r.task_name+' · ':'')+timestamp(r.job_created)+' · '+(r.job_id||'').slice(0,8);tr.append(jobCell);
     tr.children[5].title=`连接 ${r.connect_ms??'—'} ms / TLS ${r.tls_ms??'—'} ms / 首字节 ${r.ttfb_ms??'—'} ms（从请求开始计时）`;

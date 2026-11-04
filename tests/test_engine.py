@@ -144,6 +144,56 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.manager.job_detail(ident)['target_text'],'8.8.8.0/30')
         with self.assertRaises(ValueError):self.manager.job_detail('missing')
 
+    def test_completed_task_keeps_all_hit_levels_and_counters(self):
+        levels=['dual_verified','trace_valid','suspected','legacy']
+        async def result(ip,port,*args,**kwargs):
+            index=int(ip.rsplit('.',1)[1])-1
+            return dict(ip=ip,port=port,status='hit' if index<4 else 'closed_or_error',
+                        evidence=levels[index] if index<4 else 'none',verified='',latency_ms=1)
+        with patch('engine.probe',result):
+            ident=self.manager.start({'targets':'8.8.8.0/29','ports':'443'})
+            self.wait()
+        job=self.manager.jobs()[0]
+        self.assertEqual((job['status'],job['total'],job['done'],job['hits']),('completed',6,6,4))
+        rows=self.manager.results(ident,'all')
+        self.assertEqual(rows['total'],4)
+        self.assertEqual({r['evidence'] for r in rows['items']},set(levels))
+        with connect(self.manager.path) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM observations WHERE job=? AND hit=0',(ident,)).fetchone()[0],0)
+        self.manager=Manager(self.manager.path)
+        self.assertEqual(self.manager.results(ident,'all')['total'],4)
+        self.assertEqual(self.manager.jobs()[0]['done'],6)
+
+    def test_startup_cleans_completed_only_and_preserves_paused_checkpoints(self):
+        async def fail(ip,port,*args,**kwargs):
+            return dict(ip=ip,port=port,status='closed_or_error',verified='',latency_ms=1)
+        with patch('engine.probe',fail):
+            completed=self.manager.start({'targets':'8.8.8.8','ports':'443'})
+            self.wait()
+        self.assertEqual(self.manager.results(completed,'all')['total'],0)
+        def seed(db,job,ip):
+            data=dict(ip=ip,port=443,status='open_not_cf')
+            db.execute('INSERT INTO results(job,ip,port,status,data,evidence) VALUES (?,?,?,?,?,?)',(job,ip,443,'open_not_cf',json.dumps(data),'none'))
+            db.execute('INSERT INTO observations VALUES (?,?,?,?,?,?)',(job,ip,443,1,0,0))
+        with connect(self.manager.path) as db:
+            seed(db,completed,'8.8.8.8')
+            cfg=prepare({'targets':'1.1.1.0/30','ports':'443'})
+            db.execute('INSERT INTO jobs(id,created,updated,status,config,total,done,hits) VALUES (?,?,?,?,?,?,?,?)',('paused',2,2,'stopped',json.dumps(cfg),2,1,0))
+            seed(db,'paused','1.1.1.1')
+        self.manager=Manager(self.manager.path)
+        self.assertEqual(self.manager.results(completed,'all')['total'],0)
+        self.assertEqual(self.manager.results('paused','all')['total'],1)
+        calls=[]
+        async def finish(ip,port,*args,**kwargs):
+            calls.append(ip)
+            return dict(ip=ip,port=port,status='closed_or_error',latency_ms=1)
+        with patch('engine.probe',finish):
+            self.manager.start(resume='paused')
+            self.wait()
+        self.assertEqual(calls,['1.1.1.2'])
+        self.assertEqual(self.manager.results('paused','all')['total'],0)
+        self.assertEqual(next(j for j in self.manager.jobs() if j['id']=='paused')['done'],2)
+
     def test_failure_is_visible(self):
         async def fail(*args, **kwargs):
             raise RuntimeError('simulated failure')
