@@ -139,7 +139,7 @@ c=manage.read_config()
 host=c.get('CFVPS_HOST','0.0.0.0')
 if host=='0.0.0.0': host='127.0.0.1'
 url='http://'+host+':'+c.get('CFVPS_PORT','8787')+'/api/jobs'
-for _ in range(40):
+for _ in range(480):
     try:
         urllib.request.urlopen(url,timeout=1)
     except urllib.error.HTTPError as exc:
