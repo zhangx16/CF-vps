@@ -23,11 +23,11 @@ from providers import ProviderStore
 ROOT = Path(__file__).resolve().parent
 
 
-def csv_disposition(ident, sources, favorites=False):
+def csv_disposition(ident, sources, favorites=False, extension="csv"):
     source=sources.get(ident,{})
     name=('收藏夹' if favorites else '全部测试结果') if ident=='*' else source.get('task_name') or f"{source.get('provider_name','测试结果')}-{ident[:8]}"
     name=re.sub(r'[\x00-\x1f\x7f<>:"/\\|?*]', '_',name).strip(' .')[:100].rstrip(' .') or '测试结果'
-    return 'attachment; filename="results.csv"; filename*=UTF-8\'\''+quote(name+'.csv',safe='')
+    return 'attachment; filename="results.'+extension+'"; filename*=UTF-8\'\''+quote(name+'.'+extension,safe='')
 
 
 class LimitedHTTPServer(ThreadingHTTPServer):
@@ -146,7 +146,7 @@ def make_handler(manager, password, providers=None):
                         region=query.get('region',[''])[0], colo=query.get('colo',[''])[0],
                         search=query.get('search',[''])[0], sort=query.get('sort',['newest'])[0], cursor=query.get('cursor',[''])[0],provider=query.get('provider',[''])[0],favorites=query.get('favorites',[''])[0]=='1'))
                 elif parsed.path == '/api/confirmed-export':
-                    self.reply(200,manager.confirmed_text(query.get('id',[''])[0],query.get('format',['ips'])[0]),'text/plain; charset=utf-8',{'Content-Disposition':'attachment; filename=local-confirmed.txt'})
+                    self.reply(200,manager.confirmed_text(query.get('id',[''])[0],query.get('format',['ips'])[0]),'text/plain; charset=utf-8',{'Content-Disposition':csv_disposition(query.get('id',[''])[0],manager.job_sources(),extension='txt')})
                 elif parsed.path == '/api/confirmed':
                     self.reply(200,manager.confirmed(query.get('id',[''])[0]))
                 elif parsed.path == '/api/catalog':

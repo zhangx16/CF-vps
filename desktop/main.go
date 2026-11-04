@@ -26,7 +26,7 @@ import (
 
 //go:embed ui/*
 var assets embed.FS
-var version = "0.2.0-beta.2"
+var version = "0.2.0-beta.3"
 
 func reply(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -48,6 +48,10 @@ func (a *App) handler() http.Handler {
 		if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
 			http.Error(w, "Invalid origin", 403)
 			return
+		}
+		if r.Method == "POST" && (r.URL.Path == "/api/create" || r.URL.Path == "/api/resume" || r.URL.Path == "/api/pause" || r.URL.Path == "/api/task-select") {
+			a.controlMu.Lock()
+			defer a.controlMu.Unlock()
 		}
 		var err error
 		switch r.URL.Path {
@@ -77,7 +81,11 @@ func (a *App) handler() http.Handler {
 			for i := range templates {
 				templates[i].Link = ""
 			}
-			reply(w, map[string]any{"project": a.projectKind(), "tcp_skipped": a.skipTCP(), "version": version, "name": a.state.Name, "status": a.state.Status, "error": a.state.Error, "total": len(a.state.Candidates), "tcp_done": done, "tcp_passed": passed, "proxy_total": passed * len(templates), "proxy_done": len(a.state.Results), "passed": stable, "templates": templates, "site_kind": a.state.SiteKind, "site": a.state.Site, "job": a.state.Job, "options": a.state.Options})
+			status := a.state.Status
+			if !a.running && a.busyLocked() {
+				status = "stopping"
+			}
+			reply(w, map[string]any{"id": a.state.ID, "history_enabled": a.historyEnabled(), "created": a.state.Created, "project": a.projectKind(), "tcp_skipped": a.skipTCP(), "version": version, "name": a.state.Name, "status": status, "error": a.state.Error, "total": len(a.state.Candidates), "tcp_done": done, "tcp_passed": passed, "proxy_total": passed * len(templates), "proxy_done": len(a.state.Results), "passed": stable, "templates": templates, "site_kind": a.state.SiteKind, "site": a.state.Site, "job": a.state.Job, "options": a.state.Options})
 			a.mu.Unlock()
 			return
 		case "/api/results":
@@ -87,6 +95,9 @@ func (a *App) handler() http.Handler {
 			a.mu.Lock()
 			items := []Result{}
 			for _, v := range a.state.Results {
+				if v.Target == "" {
+					v.Target = a.state.Options.Target
+				}
 				if filter := r.URL.Query().Get("status"); filter != "" && filter != v.Status {
 					continue
 				}
@@ -114,6 +125,26 @@ func (a *App) handler() http.Handler {
 			}
 			reply(w, map[string]any{"items": items[start:end], "total": total, "page": page})
 			return
+		case "/api/tasks":
+			if r.Method != "GET" {
+				break
+			}
+			var list []TaskInfo
+			list, err = a.taskList()
+			if err == nil {
+				reply(w, list)
+				return
+			}
+		case "/api/task-select":
+			if r.Method != "POST" {
+				break
+			}
+			var q struct {
+				ID string `json:"id"`
+			}
+			if err = decode(w, r, &q); err == nil {
+				err = a.selectTask(q.ID)
+			}
 		case "/api/create":
 			if r.Method != "POST" {
 				break
@@ -135,20 +166,8 @@ func (a *App) handler() http.Handler {
 				err = errors.New("不支持的网站类型")
 				break
 			}
-			if !q.Options.BypassConfirmed {
-				err = errors.New("请先关闭 TUN/VPN，或确认候选地址已排除代理")
+			if q.Options, err = a.validateOptions(q.Options); err != nil {
 				break
-			}
-			if (!a.skipTCP() && (q.Options.TCPConcurrency < 1 || q.Options.TCPConcurrency > 1000)) || q.Options.ProxyConcurrency < 1 || q.Options.ProxyConcurrency > 50 || q.Options.Timeout < 1 || q.Options.Timeout > 30 || q.Options.Attempts < 1 || q.Options.Attempts > 5 {
-				err = errors.New("并发、超时或复测次数超出范围")
-				break
-			}
-			if q.Options.Target != "https://www.gstatic.com/generate_204" && q.Options.Target != "https://www.cloudflare.com/cdn-cgi/trace" {
-				err = errors.New("不支持的测试目标")
-				break
-			}
-			if a.skipTCP() {
-				q.Options.TCPConcurrency = 0
 			}
 			if len(q.Templates) == 0 || len(q.Templates) > 10 {
 				err = errors.New("请提供 1–10 个节点模板")
@@ -174,11 +193,28 @@ func (a *App) handler() http.Handler {
 				err = errors.New("IP 与模板组合最多 50 万个")
 				break
 			}
+			if a.historyEnabled() {
+				a.mu.Lock()
+				busy := a.busyLocked()
+				a.mu.Unlock()
+				if busy {
+					err = errors.New("请先暂停当前任务并等待保存完成")
+					break
+				}
+				if err = a.save(); err != nil {
+					break
+				}
+			}
+			id, idErr := newTaskID()
+			if idErr != nil {
+				err = idErr
+				break
+			}
 			a.mu.Lock()
-			if a.running {
-				err = errors.New("请先暂停当前任务")
+			if a.busyLocked() {
+				err = errors.New("请先暂停当前任务并等待进度保存完成")
 			} else {
-				a.state = State{Name: q.Name, Status: "paused", Created: time.Now().Unix(), Input: q.Input, Options: q.Options, Templates: q.Templates, Candidates: candidates, TCPDone: make([]bool, len(candidates)), TCPLatency: make([]float64, len(candidates)), Results: map[string]Result{}, Site: q.Site, Job: q.Job, SiteKind: q.SiteKind}
+				a.state = State{ID: id, Name: q.Name, Status: "paused", Created: time.Now().Unix(), Input: q.Input, Options: q.Options, Templates: q.Templates, Candidates: candidates, TCPDone: make([]bool, len(candidates)), TCPLatency: make([]float64, len(candidates)), Results: map[string]Result{}, Site: q.Site, Job: q.Job, SiteKind: q.SiteKind}
 			}
 			a.mu.Unlock()
 			if err == nil {
@@ -191,7 +227,12 @@ func (a *App) handler() http.Handler {
 			if r.Method != "POST" {
 				break
 			}
-			err = a.start()
+			var q struct {
+				Options *Options `json:"options"`
+			}
+			if err = decode(w, r, &q); err == nil {
+				err = a.resumeWithOptions(q.Options)
+			}
 		case "/api/pause":
 			if r.Method != "POST" {
 				break
@@ -214,23 +255,33 @@ func (a *App) handler() http.Handler {
 				break
 			}
 			a.mu.Lock()
+			if id := r.URL.Query().Get("task"); id != "" && id != a.state.ID {
+				a.mu.Unlock()
+				err = errors.New("任务已切换，请刷新后导出")
+				break
+			}
+			filename := exportFilename(a.state.Name, r.URL.Query().Get("format"))
 			rows := []Result{}
 			for _, v := range a.state.Results {
 				if v.Status == "passed" {
+					if v.Target == "" {
+						v.Target = a.state.Options.Target
+					}
 					rows = append(rows, v)
 				}
 			}
 			templates := append([]Template(nil), a.state.Templates...)
 			a.mu.Unlock()
+			w.Header().Set("Content-Disposition", "attachment; filename=results"+filepath.Ext(filename)+"; filename*=UTF-8''"+url.PathEscape(filename))
 			sort.Slice(rows, func(i, j int) bool { return rows[i].Median < rows[j].Median })
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			if r.URL.Query().Get("format") == "csv" {
 				w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 				w.Write([]byte{239, 187, 191})
 				c := csv.NewWriter(w)
-				c.Write([]string{"IP", "端口", "模板", "地区", "延迟ms", "成功次数"})
+				c.Write([]string{"IP", "端口", "模板", "地区", "延迟ms", "成功次数", "验证目标"})
 				for _, v := range rows {
-					c.Write([]string{v.IP, strconv.Itoa(v.Port), v.Name, v.Region, fmt.Sprintf("%.2f", v.Median), fmt.Sprintf("%d/%d", v.Success, v.Attempts)})
+					c.Write([]string{v.IP, strconv.Itoa(v.Port), v.Name, v.Region, fmt.Sprintf("%.2f", v.Median), fmt.Sprintf("%d/%d", v.Success, v.Attempts), v.Target})
 				}
 				c.Flush()
 			} else {
@@ -369,6 +420,11 @@ func main() {
 	migrateCFState(dir)
 	a := &App{project: defaultProject, dir: dir, core: core, token: hex.EncodeToString(secret)}
 	a.load()
+	if a.historyEnabled() && len(a.state.Candidates) > 0 {
+		if e := a.save(); e != nil {
+			a.state.Error = "历史任务保存失败：" + e.Error()
+		}
+	}
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if e.IsDir() && strings.HasPrefix(e.Name(), "core-") {

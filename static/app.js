@@ -162,7 +162,7 @@ refresh();setInterval(refresh,2000);
 
 // Export locally: credentials never enter API requests. Saved templates are opt-in browser storage.
 let nodeExportScope=null,nodeExportRun=0;
-$('open-node-export').onclick=()=>{nodeExportScope={query:filterQuery(),selected:[...checked.values()]};$('node-port-mode').value='candidate';$('node-scope').value=checked.size?'selected':'filtered';$('node-export-status').textContent=`已锁定当前筛选范围；勾选 ${checked.size} 个候选。`;$('node-export-dialog').showModal();renderNodeTemplateOptions();$('node-template').focus();};
+$('open-node-export').onclick=()=>{nodeExportScope={query:filterQuery(),selected:[...checked.values()],name:resultExportName()};$('node-port-mode').value='candidate';$('node-scope').value=checked.size?'selected':'filtered';$('node-export-status').textContent=`已锁定当前筛选范围；勾选 ${checked.size} 个候选。`;$('node-export-dialog').showModal();renderNodeTemplateOptions();$('node-template').focus();};
 function clearNodeExport(){nodeExportRun++;$('node-template').value='';$('node-output').value='';$('copy-nodes').disabled=$('download-nodes').disabled=true;$('generate-nodes').disabled=false;}
 $('close-node-export').onclick=()=>$('node-export-dialog').close();$('node-export-dialog').addEventListener('close',clearNodeExport);
 function buildNodeLinks(template,candidates,portMode,limit){
@@ -186,7 +186,7 @@ $('node-export-form').onsubmit=async e=>{e.preventDefault();const run=++nodeExpo
  }catch(e){if(run===nodeExportRun)$('node-export-status').textContent=e.message;}finally{if(run===nodeExportRun)$('generate-nodes').disabled=false;}
 };
 $('copy-nodes').onclick=async()=>{try{await navigator.clipboard.writeText($('node-output').value);$('node-export-status').textContent='已复制，在 v2rayN 按 Ctrl+V 导入。';}catch{$('node-output').select();$('node-export-status').textContent='请按 Ctrl+C 复制选中的链接。';}};
-$('download-nodes').onclick=()=>{const url=URL.createObjectURL(new Blob([$ ('node-output').value],{type:'text/plain;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='v2rayN-candidates.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+$('download-nodes').onclick=()=>{const url=URL.createObjectURL(new Blob([$ ('node-output').value],{type:'text/plain;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=safeTextFilename(nodeExportScope?.name);a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 
 const NODE_LIBRARY_KEY='cfvps.nodeTemplates.v1';let nodeTemplates=[];
 try{const saved=JSON.parse(localStorage.getItem(NODE_LIBRARY_KEY)||'[]');if(Array.isArray(saved)&&saved.length<=200)nodeTemplates=saved.filter(n=>typeof n.id==='string'&&typeof n.name==='string'&&typeof n.region==='string'&&typeof n.link==='string'&&n.link.length<=8192);}catch{}
@@ -227,3 +227,6 @@ async function renderLocalConfirmed(id,force=false){
  const body=$('local-confirmed-rows');body.replaceChildren();for(const r of d.items){const tr=document.createElement('tr'),ip=document.createElement('td'),when=document.createElement('td'),action=document.createElement('td'),remove=document.createElement('button');ip.append(ipButton(r.ip,r.port));when.textContent=timestamp(r.updated);remove.textContent='移除标记';remove.onclick=async()=>{try{await api('/api/confirmed-delete',{id,ip:r.ip,port:r.port});epoch++;await renderLocalConfirmed(id,true);await renderResults();}catch(e){message(e)}};action.append(remove);tr.append(ip,when,action);body.append(tr);}
 }
 $('local-confirmed').addEventListener('toggle',()=>{if($('local-confirmed').open)renderLocalConfirmed(resultId(),true).catch(message);});
+
+function resultExportName(){const id=resultId();if(id==='*')return window.resultCenter?.favorites?'收藏夹':'全部测试结果';const item=window.resultCenter?.jobs.find(j=>j.id===id);return item?.task_name||jobs.find(j=>j.id===id)?.config?.task_name||item?.provider_name||'测试结果';}
+function safeTextFilename(name){return ([...(name||'测试结果').replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g,'_').replace(/^[ .]+|[ .]+$/g,'')].slice(0,100).join('')||'测试结果')+'.txt';}

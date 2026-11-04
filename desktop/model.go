@@ -27,6 +27,7 @@ type Sample struct {
 	Error string  `json:"error,omitempty"`
 }
 type Result struct {
+	Target string `json:"target,omitempty"`
 	Endpoint
 	Template int      `json:"template"`
 	Name     string   `json:"name"`
@@ -53,6 +54,7 @@ type Options struct {
 	BypassConfirmed  bool    `json:"bypass_confirmed"`
 }
 type State struct {
+	ID         string            `json:"id,omitempty"`
 	SiteKind   string            `json:"site_kind,omitempty"`
 	Name       string            `json:"name"`
 	Status     string            `json:"status"`
@@ -69,17 +71,18 @@ type State struct {
 	Job        string            `json:"job,omitempty"`
 }
 type App struct {
-	tcpProbe func(context.Context, Endpoint, time.Duration) (float64, error)
-	project  string
-	mu       sync.Mutex
-	state    State
-	dir      string
-	core     string
-	cancel   context.CancelFunc
-	running  bool
-	done     chan struct{}
-	token    string
-	saveMu   sync.Mutex
+	controlMu sync.Mutex
+	tcpProbe  func(context.Context, Endpoint, time.Duration) (float64, error)
+	project   string
+	mu        sync.Mutex
+	state     State
+	dir       string
+	core      string
+	cancel    context.CancelFunc
+	running   bool
+	done      chan struct{}
+	token     string
+	saveMu    sync.Mutex
 }
 
 var uuidRE = regexp.MustCompile(`(?i)^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$`)
@@ -249,28 +252,39 @@ func (a *App) save() error {
 	a.saveMu.Lock()
 	defer a.saveMu.Unlock()
 	a.mu.Lock()
+	if len(a.state.Candidates) > 0 && a.state.ID == "" {
+		id, e := newTaskID()
+		if e != nil {
+			a.mu.Unlock()
+			return e
+		}
+		a.state.ID = id
+	}
 	data, e := json.Marshal(a.state)
+	info := taskInfo(a.state)
+	archive := a.historyEnabled() && len(a.state.Candidates) > 0 && a.state.SiteKind != "cf-vps"
 	a.mu.Unlock()
 	if e != nil {
 		return e
 	}
-	next := filepath.Join(a.dir, "state.next.json")
-	if e = os.WriteFile(next, data, 0600); e != nil {
-		return e
-	}
-	target := filepath.Join(a.dir, "state.json")
-	backup := filepath.Join(a.dir, "state.previous.json")
-	os.Remove(backup)
-	if _, e = os.Stat(target); e == nil {
-		if e = os.Rename(target, backup); e != nil {
+	if archive {
+		if !taskIDPattern.MatchString(info.ID) {
+			return errors.New("任务 ID 无效")
+		}
+		dir := filepath.Join(a.dir, "tasks")
+		if e = os.MkdirAll(dir, 0700); e != nil {
+			return e
+		}
+		base := filepath.Join(dir, info.ID)
+		if e = writeCheckpoint(base+".json", base+".previous.json", base+".next.json", data); e != nil {
+			return e
+		}
+		meta, _ := json.Marshal(info)
+		if e = writeCheckpoint(base+".meta.json", base+".meta.previous.json", base+".meta.next.json", meta); e != nil {
 			return e
 		}
 	}
-	if e = os.Rename(next, target); e != nil {
-		os.Rename(backup, target)
-		return e
-	}
-	return nil
+	return writeCheckpoint(filepath.Join(a.dir, "state.json"), filepath.Join(a.dir, "state.previous.json"), filepath.Join(a.dir, "state.next.json"), data)
 }
 func (a *App) load() {
 	for _, name := range []string{"state.json", "state.previous.json"} {
@@ -279,18 +293,25 @@ func (a *App) load() {
 			continue
 		}
 		var state State
-		if json.Unmarshal(data, &state) != nil {
+		if json.Unmarshal(data, &state) != nil || normalizeTask(&state) != nil {
 			continue
 		}
-		if state.Status == "running" || state.Status == "stopping" {
-			state.Status = "paused"
-		}
-		if state.Results == nil {
-			state.Results = map[string]Result{}
+		if a.historyEnabled() && taskIDPattern.MatchString(state.ID) {
+			if saved, e := a.readTask(state.ID); e == nil {
+				state = saved
+			}
 		}
 		a.state = state
 		a.prepareProfileState()
 		return
+	}
+	if a.historyEnabled() {
+		if list, e := a.taskList(); e == nil && len(list) > 0 {
+			if state, e := a.readTask(list[0].ID); e == nil {
+				a.state = state
+				return
+			}
+		}
 	}
 	a.state = State{Status: "idle", Results: map[string]Result{}}
 }

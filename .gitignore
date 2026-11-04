@@ -13,3 +13,7 @@ desktop/dist/
 desktop/core/
 desktop/state*.json
 desktop/*.exe
+
+desktop/tasks/
+desktop/打开界面.url
+desktop/last-core-error.txt

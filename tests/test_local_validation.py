@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+from urllib.parse import unquote
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from engine import Manager, connect, prepare
@@ -29,7 +30,7 @@ class LocalValidationTests(unittest.TestCase):
         if csrf:headers['X-Requested-With']='CF-VPS'
         if data is not None:headers['Content-Type']='application/json'
         c=http.client.HTTPConnection(*self.server.server_address,timeout=5);c.request(method,path,json.dumps(data) if data is not None else None,headers)
-        r=c.getresponse();status=r.status;raw=r.read();c.close();return status,raw
+        r=c.getresponse();status=r.status;self.last_headers=dict(r.getheaders());raw=r.read();c.close();return status,raw
     def test_exact_port_task_dedup_and_persistence(self):
         payload=dict(id='one',endpoints=[dict(ip='8.8.8.8',port=8443)]*2+[dict(ip='8.8.8.8',port=9443)])
         status,raw=self.request('POST','/api/confirmed-import',payload);d=json.loads(raw)
@@ -51,6 +52,7 @@ class LocalValidationTests(unittest.TestCase):
         self.assertEqual(self.request('GET','/api/confirmed-export?id=one',auth=False)[0],401)
         self.assertEqual(self.request('POST','/api/confirmed-import',p)[0],200)
         status,raw=self.request('GET','/api/confirmed-export?id=one&format=ips');self.assertEqual((status,raw),(200,b'8.8.8.8'))
+        self.assertIn('本地验证测试.txt',unquote(self.last_headers['Content-Disposition']))
         self.assertEqual(self.request('GET','/api/confirmed-export?id=one&format=endpoints')[1],b'8.8.8.8:443\n8.8.8.8:8443')
         self.assertEqual(self.request('POST','/api/confirmed-delete',dict(id='one',ip='8.8.8.8',port=443))[0],200)
         self.assertEqual(self.manager.confirmed('one')['endpoints'],'8.8.8.8:8443')

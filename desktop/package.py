@@ -9,7 +9,7 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '0.2.0-beta.2'
+VERSION = '0.2.0-beta.3'
 PROGRAM = 'CF-VPS-Desktop'
 XRAY_VERSION = 'v26.10.31'
 XRAY_SHA256 = '2e04a9995a6f2ad1b28c0bb25c708ecb2695e43a1c9c7889c4b6ac2b48cf7a6a'

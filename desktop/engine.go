@@ -143,7 +143,7 @@ func probe(ctx context.Context, port int, target string, timeout time.Duration) 
 func (a *App) start() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.running {
+	if a.busyLocked() {
 		return errors.New("任务正在运行")
 	}
 	if a.state.SiteKind != "" && a.state.SiteKind != a.projectKind() {
@@ -223,7 +223,9 @@ func (a *App) run(ctx context.Context) {
 	}
 	timeout := time.Duration(opts.Timeout * float64(time.Second))
 	checkDone := make(chan struct{})
+	checkExited := make(chan struct{})
 	go func() {
+		defer close(checkExited)
 		tick := time.NewTicker(5 * time.Second)
 		defer tick.Stop()
 		for {
@@ -243,7 +245,7 @@ func (a *App) run(ctx context.Context) {
 			}
 		}
 	}()
-	defer close(checkDone)
+	defer func() { close(checkDone); <-checkExited }()
 	if !a.skipTCP() {
 		jobs := make(chan int)
 		var wg sync.WaitGroup
@@ -402,7 +404,7 @@ func (a *App) testBatchOnce(ctx context.Context, templates []Template, batch []w
 					return
 				}
 				t := templates[w.Index]
-				r := Result{Endpoint: w.Endpoint, Template: w.Index, Name: t.Name, Region: t.Region, TCP: w.TCP, Status: "failed"}
+				r := Result{Target: opts.Target, Endpoint: w.Endpoint, Template: w.Index, Name: t.Name, Region: t.Region, TCP: w.TCP, Status: "failed"}
 				times := []float64{}
 				for attempt := 0; attempt < opts.Attempts; attempt++ {
 					s := probe(ctx, w.Port, opts.Target, time.Duration(opts.Timeout*float64(time.Second)))
