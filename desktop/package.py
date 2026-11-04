@@ -34,7 +34,7 @@ def main():
             (stage / 'core' / name).write_bytes(source.read(name))
     for name in ['README.md', 'THIRD_PARTY_NOTICES.md']:
         shutil.copyfile(ROOT / name, stage / name)
-    shutil.copyfile(ROOT.parent / 'LICENSE', stage / 'LICENSE')
+    shutil.copyfile(ROOT / 'LICENSE', stage / 'LICENSE')
     target = dist / f'{PROGRAM}-{VERSION}-windows-amd64.zip'
     with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED) as output:
         for path in sorted(stage.rglob('*')):
