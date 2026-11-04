@@ -39,6 +39,12 @@ class EngineTests(unittest.TestCase):
         for value in [0,5001]:
             with self.assertRaises(ValueError):prepare({'targets':'8.8.8.8','concurrency':value})
 
+    def test_request_rate_upper_bound(self):
+        for value in [1,1000,1001,2000]:
+            self.assertEqual(prepare({'targets':'8.8.8.8','rps':value})['rps'],value)
+        for value in [0,2001,float('inf'),float('nan')]:
+            with self.assertRaises(ValueError):prepare({'targets':'8.8.8.8','rps':value})
+
     def test_stop_resume_skips_nonhits_and_recovers_restart(self):
         calls = []
         async def fake(ip, port, timeout, sem, **kwargs):

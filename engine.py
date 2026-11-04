@@ -80,8 +80,8 @@ def prepare(raw):
     minimum = max(1,min(int(raw.get('min_concurrency',10)),concurrency))
     if not 1 <= concurrency <= 5000 or not math.isfinite(timeout) or not 0.5 <= timeout <= 30 or not 1 <= attempts <= 3:
         raise ValueError('并发 1–5000，超时 0.5–30 秒，尝试次数 1–3')
-    if not math.isfinite(rps) or not 1 <= rps <= 1000:
-        raise ValueError('每秒请求上限应在 1–1000')
+    if not math.isfinite(rps) or not 1 <= rps <= 2000:
+        raise ValueError('每秒请求上限应在 1–2000')
     total = sum(n.num_addresses if n.prefixlen >= 31 else n.num_addresses - 2 for n in nets) * len(ports)
     if total > 2_000_000:
         raise ValueError('单次任务最多 200 万个 IP:端口，请拆分网段')
