@@ -8,3 +8,8 @@ data/
 *.csv
 .env
 .venv/
+
+desktop/dist/
+desktop/core/
+desktop/state*.json
+desktop/*.exe

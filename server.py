@@ -145,6 +145,10 @@ def make_handler(manager, password, providers=None):
                     self.reply(200, manager.results(query.get('id', [''])[0], query.get('view', ['hits'])[0],
                         region=query.get('region',[''])[0], colo=query.get('colo',[''])[0],
                         search=query.get('search',[''])[0], sort=query.get('sort',['newest'])[0], cursor=query.get('cursor',[''])[0],provider=query.get('provider',[''])[0],favorites=query.get('favorites',[''])[0]=='1'))
+                elif parsed.path == '/api/confirmed-export':
+                    self.reply(200,manager.confirmed_text(query.get('id',[''])[0],query.get('format',['ips'])[0]),'text/plain; charset=utf-8',{'Content-Disposition':'attachment; filename=local-confirmed.txt'})
+                elif parsed.path == '/api/confirmed':
+                    self.reply(200,manager.confirmed(query.get('id',[''])[0]))
                 elif parsed.path == '/api/catalog':
                     self.reply(200,manager.catalog())
                 elif parsed.path == '/api/providers':
@@ -246,6 +250,10 @@ def make_handler(manager, password, providers=None):
                         raise ValueError('缺少任务 ID')
                     manager.delete(ident)
                     self.reply(200, {'ok': True})
+                elif path == '/api/confirmed-import':
+                    self.reply(200,manager.import_confirmed(raw.get('id'),raw.get('endpoints')))
+                elif path == '/api/confirmed-delete':
+                    self.reply(200,manager.delete_confirmed(raw.get('id'),raw.get('ip'),raw.get('port')))
                 elif path == '/api/favorite':
                     self.reply(200,manager.favorite(raw.get('ip'),raw.get('port'),raw.get('enabled')))
                 elif path == '/api/stop':

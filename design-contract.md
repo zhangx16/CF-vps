@@ -78,3 +78,5 @@ The user requested a dedicated left-side results module. A reference-style navig
 ## Regional profiles and resume affordance
 
 Provider presets are reduced to DMIT, BWH, GoMami Hong Kong, VMISS United States and ISIF Cloud Hong Kong, as requested. Regional provenance is stated in the existing notes area. Pausing retains the existing checkpoint mechanism; the stop label becomes pause, and a reference-style notice in the overview exposes the last unfinished task with continue/view controls. No automatic resume is performed on page load.
+
+Local desktop integration: existing sidebar link and task-targets accordion styles reused for results/local-validation. Local validation badge and result-type filter retain the original evidence semantics; no region logic changed.

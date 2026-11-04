@@ -91,7 +91,7 @@ async function renderResults() {
   for(const r of visible) {
     const tr=document.createElement('tr'),tick=document.createElement('input');tick.type='checkbox';tick.setAttribute('aria-label',`选择 ${r.ip}:${r.port}`);const key=`${r.ip}:${r.port}`;tick.checked=checked.has(key);
     tick.onchange=()=>{if(tick.checked)checked.set(key,{ip:r.ip,port:r.port});else checked.delete(key);selectionState();};
-    let td=document.createElement('td');td.append(tick);tr.append(td);td=document.createElement('td');td.append(favoriteButton(r),ipButton(r.ip,r.port));tr.append(td);td=document.createElement('td');td.className='catalog-column';td.textContent=r.provider_name||'未知来源';tr.append(td);
+    let td=document.createElement('td');td.append(tick);tr.append(td);td=document.createElement('td');td.append(favoriteButton(r),ipButton(r.ip,r.port));if(r.local_confirmed){const badge=document.createElement('span');badge.className='badge';badge.textContent='本地已验证';td.append(badge);}tr.append(td);td=document.createElement('td');td.className='catalog-column';td.textContent=r.provider_name||'未知来源';tr.append(td);
     const h=r.history||{},ms=r.request_ms??r.latency_ms;
     const values=[levels[r.evidence]||labels[r.status]||r.status,verifications[r.verification]||(r.verified==='1'?'旧版确认':'—'),ms===''||ms==null?'—':`${ms} ms`,r.colo||'—',regionName(r.loc),timestamp(h.first_seen),timestamp(h.last_confirmed),h.successes?`${h.successes} 次命中 / ${h.confirmations||0} 次双域名确认`:'—',errors[r.error_kind]||errors[r.verify_error]||r.err||r.server||'—'];
     for(const value of values){const cell=document.createElement('td');cell.textContent=value;tr.append(cell);}
@@ -101,7 +101,7 @@ async function renderResults() {
   }
   if(!visible.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=13;td.className='empty';td.textContent='当前筛选下暂无结果';tr.append(td);body.append(tr);}
   $('page').textContent=`第 ${page} 页 · 共 ${data.total.toLocaleString()} 条`;$('prev').disabled=!previous.length;$('next').disabled=!nextCursor;
-  const query=filterQuery();query.delete('cursor');$('export').href='/api/export?'+query;selectionState();
+  const query=filterQuery();query.delete('cursor');$('export').href='/api/export?'+query;selectionState();await renderLocalConfirmed(current);
 }
 async function refresh() {
   if(polling)return;polling=true;
@@ -214,3 +214,16 @@ async function renderTaskTargets(){
 }
 $('copy-task-targets').onclick=async()=>{if(!targetDetail)return;try{await navigator.clipboard.writeText(targetDetail.target_text);$('task-targets-status').textContent='已复制任务网段。';}catch{$('task-targets-text').focus();$('task-targets-text').select();$('task-targets-status').textContent='请按 Ctrl+C 复制选中的网段。';}};
 $('download-task-targets').onclick=()=>{if(!targetDetail)return;const name=(targetDetail.task_name||targetDetail.provider_name||'任务网段').replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g,'_').replace(/^[ .]+|[ .]+$/g,'').slice(0,100)||'任务网段';const url=URL.createObjectURL(new Blob([targetDetail.target_text],{type:'text/plain;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download=name+'-网段.txt';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+
+// Desktop returns endpoints only. Keep local verification separate from CF evidence.
+let localConfirmedID='',localConfirmedAt=0;
+async function renderLocalConfirmed(id,force=false){
+ const panel=$('local-confirmed');if(!panel.open)return;
+ if(id==='*'||!id){$('local-confirmed-status').textContent='请先选择左侧的具体测试任务。';$('local-confirmed-rows').replaceChildren();$('local-confirmed-ips').hidden=$('local-confirmed-endpoints').hidden=true;return;}
+ if(!force&&id===localConfirmedID&&Date.now()-localConfirmedAt<10000)return;
+ const d=await api('/api/confirmed?'+new URLSearchParams({id}));if(id!==resultId())return;localConfirmedID=id;localConfirmedAt=Date.now();
+ $('local-confirmed-status').textContent=`已回填 ${d.total} 个 IP:端口，${d.ip_count} 个不同 IP。${d.total>200?'以下预览最近 200 条，导出包含全部通过记录。':''}`;
+ for(const [key,format] of [['local-confirmed-ips','ips'],['local-confirmed-endpoints','endpoints']]){$(key).hidden=!d.total;$(key).href='/api/confirmed-export?'+new URLSearchParams({id,format});}
+ const body=$('local-confirmed-rows');body.replaceChildren();for(const r of d.items){const tr=document.createElement('tr'),ip=document.createElement('td'),when=document.createElement('td'),action=document.createElement('td'),remove=document.createElement('button');ip.append(ipButton(r.ip,r.port));when.textContent=timestamp(r.updated);remove.textContent='移除标记';remove.onclick=async()=>{try{await api('/api/confirmed-delete',{id,ip:r.ip,port:r.port});epoch++;await renderLocalConfirmed(id,true);await renderResults();}catch(e){message(e)}};action.append(remove);tr.append(ip,when,action);body.append(tr);}
+}
+$('local-confirmed').addEventListener('toggle',()=>{if($('local-confirmed').open)renderLocalConfirmed(resultId(),true).catch(message);});
