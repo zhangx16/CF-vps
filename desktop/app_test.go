@@ -67,7 +67,7 @@ func TestTemplateConfigAndExport(t *testing.T) {
 }
 func testApp(t *testing.T) *App {
 	t.Helper()
-	return &App{dir: t.TempDir(), token: "test-secret", state: State{Status: "paused", Results: map[string]Result{}}}
+	return &App{project: "ncv", dir: t.TempDir(), token: "test-secret", state: State{Status: "paused", Results: map[string]Result{}}}
 }
 func TestSaveResumeAndFallback(t *testing.T) {
 	a := testApp(t)

@@ -69,15 +69,17 @@ type State struct {
 	Job        string            `json:"job,omitempty"`
 }
 type App struct {
-	mu      sync.Mutex
-	state   State
-	dir     string
-	core    string
-	cancel  context.CancelFunc
-	running bool
-	done    chan struct{}
-	token   string
-	saveMu  sync.Mutex
+	tcpProbe func(context.Context, Endpoint, time.Duration) (float64, error)
+	project  string
+	mu       sync.Mutex
+	state    State
+	dir      string
+	core     string
+	cancel   context.CancelFunc
+	running  bool
+	done     chan struct{}
+	token    string
+	saveMu   sync.Mutex
 }
 
 var uuidRE = regexp.MustCompile(`(?i)^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$`)
@@ -287,6 +289,7 @@ func (a *App) load() {
 			state.Results = map[string]Result{}
 		}
 		a.state = state
+		a.prepareProfileState()
 		return
 	}
 	a.state = State{Status: "idle", Results: map[string]Result{}}

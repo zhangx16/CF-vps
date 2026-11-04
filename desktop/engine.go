@@ -146,6 +146,9 @@ func (a *App) start() error {
 	if a.running {
 		return errors.New("任务正在运行")
 	}
+	if a.state.SiteKind != "" && a.state.SiteKind != a.projectKind() {
+		return errors.New("该任务属于另一项目，请使用对应的电脑程序")
+	}
 	if len(a.state.Candidates) == 0 {
 		return errors.New("尚未创建任务")
 	}
@@ -193,11 +196,11 @@ func (a *App) run(ctx context.Context) {
 	needsCore := false
 	a.mu.Lock()
 	for i, ep := range candidates {
-		if !a.state.TCPDone[i] {
+		if !a.skipTCP() && !a.state.TCPDone[i] {
 			needsCore = true
 			break
 		}
-		if a.state.TCPLatency[i] >= 0 {
+		if a.skipTCP() || a.state.TCPLatency[i] >= 0 {
 			for ti := range templates {
 				if _, ok := a.state.Results[resultKey(ti, ep)]; !ok {
 					needsCore = true
@@ -241,53 +244,63 @@ func (a *App) run(ctx context.Context) {
 		}
 	}()
 	defer close(checkDone)
-	jobs := make(chan int)
-	var wg sync.WaitGroup
-	for n := 0; n < opts.TCPConcurrency; n++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range jobs {
-				if ctx.Err() != nil {
-					return
+	if !a.skipTCP() {
+		jobs := make(chan int)
+		var wg sync.WaitGroup
+		for n := 0; n < opts.TCPConcurrency; n++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range jobs {
+					if ctx.Err() != nil {
+						return
+					}
+					check := a.tcpProbe
+					if check == nil {
+						check = dialTCP
+					}
+					ms, e := check(ctx, candidates[i], timeout)
+					if ctx.Err() != nil {
+						return
+					}
+					a.mu.Lock()
+					a.state.TCPDone[i] = true
+					a.state.TCPLatency[i] = -1
+					if e == nil {
+						a.state.TCPLatency[i] = ms
+					}
+					a.mu.Unlock()
 				}
-				ms, e := dialTCP(ctx, candidates[i], timeout)
-				if ctx.Err() != nil {
-					return
-				}
-				a.mu.Lock()
-				a.state.TCPDone[i] = true
-				a.state.TCPLatency[i] = -1
-				if e == nil {
-					a.state.TCPLatency[i] = ms
-				}
-				a.mu.Unlock()
+			}()
+		}
+	feed:
+		for i := range candidates {
+			a.mu.Lock()
+			done := a.state.TCPDone[i]
+			a.mu.Unlock()
+			if done {
+				continue
 			}
-		}()
-	}
-feed:
-	for i := range candidates {
-		a.mu.Lock()
-		done := a.state.TCPDone[i]
-		a.mu.Unlock()
-		if done {
-			continue
+			select {
+			case jobs <- i:
+			case <-ctx.Done():
+				break feed
+			}
 		}
-		select {
-		case jobs <- i:
-		case <-ctx.Done():
-			break feed
+		close(jobs)
+		wg.Wait()
+		if ctx.Err() != nil {
+			return
 		}
-	}
-	close(jobs)
-	wg.Wait()
-	if ctx.Err() != nil {
-		return
+
 	}
 	batch := []work{}
 	for i, ep := range candidates {
 		a.mu.Lock()
 		latency := a.state.TCPLatency[i]
+		if a.skipTCP() {
+			latency = 0
+		}
 		a.mu.Unlock()
 		if latency < 0 {
 			continue

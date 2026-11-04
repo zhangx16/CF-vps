@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -138,5 +140,103 @@ func TestRealCore200CandidateBatch(t *testing.T) {
 		if r.Status != "failed" {
 			t.Fatal("Closed fixture port passed")
 		}
+	}
+}
+
+func TestCFProfileDoesNotRepeatTCP(t *testing.T) {
+	core := os.Getenv("NCV_TEST_XRAY")
+	if core == "" {
+		t.Skip("Set NCV_TEST_XRAY")
+	}
+	a := testApp(t)
+	a.project = "cf-vps"
+	a.core = core
+	calls := 0
+	a.tcpProbe = func(context.Context, Endpoint, time.Duration) (float64, error) {
+		calls++
+		return 0, fmt.Errorf("TCP stage must not run")
+	}
+	a.state.SiteKind = "cf-vps"
+	a.state.Candidates = []Endpoint{{"127.0.0.1", 1}}
+	a.state.TCPDone = []bool{false}
+	a.state.TCPLatency = []float64{-1}
+	a.state.Templates = []Template{{Link: fixtureLink}}
+	a.state.Options = Options{TCPConcurrency: 0, ProxyConcurrency: 1, Timeout: 1, Attempts: 1, Target: "https://www.gstatic.com/generate_204"}
+	if e := a.start(); e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case <-a.done:
+	case <-time.After(5 * time.Second):
+		a.stop()
+		t.Fatal("CF profile blocked on TCP")
+	}
+	if calls != 0 || len(a.state.Results) != 1 || a.state.TCPDone[0] || a.state.Status != "completed" {
+		t.Fatalf("calls=%d results=%d status=%s error=%s", calls, len(a.state.Results), a.state.Status, a.state.Error)
+	}
+}
+func TestNCVProfileRetainsTCP(t *testing.T) {
+	core := os.Getenv("NCV_TEST_XRAY")
+	if core == "" {
+		t.Skip("Set NCV_TEST_XRAY")
+	}
+	a := testApp(t)
+	a.project = "ncv"
+	a.core = core
+	calls := 0
+	a.tcpProbe = func(context.Context, Endpoint, time.Duration) (float64, error) {
+		calls++
+		return 0, fmt.Errorf("fixture closed")
+	}
+	a.state.Candidates = []Endpoint{{"127.0.0.1", 1}}
+	a.state.TCPDone = []bool{false}
+	a.state.TCPLatency = []float64{0}
+	a.state.Templates = []Template{{Link: fixtureLink}}
+	a.state.Options = Options{TCPConcurrency: 1, ProxyConcurrency: 1, Timeout: 1, Attempts: 1, Target: "https://www.gstatic.com/generate_204"}
+	if e := a.start(); e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case <-a.done:
+	case <-time.After(5 * time.Second):
+		a.stop()
+		t.Fatal("NCV profile hung")
+	}
+	if calls != 1 || len(a.state.Results) != 0 || !a.state.TCPDone[0] || a.state.Status != "completed" {
+		t.Fatal(calls, a.state.Status, a.state.Error)
+	}
+}
+
+func TestCFMigrationKeepsProjectsSeparate(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	t.Setenv("AppData", base)
+	t.Setenv("APPDATA", base)
+	old := filepath.Join(base, "NCV-Desktop")
+	dest := filepath.Join(base, "CF-VPS-Desktop")
+	os.MkdirAll(old, 0700)
+	os.MkdirAll(dest, 0700)
+	other, _ := json.Marshal(State{SiteKind: "ncv", Name: "NCV 原任务", Candidates: []Endpoint{{"8.8.8.8", 443}}})
+	cf, _ := json.Marshal(State{SiteKind: "cf-vps", Name: "CF 原任务", Candidates: []Endpoint{{"8.8.8.8", 8443}}})
+	os.WriteFile(filepath.Join(old, "state.json"), other, 0600)
+	os.WriteFile(filepath.Join(old, "state.previous.json"), cf, 0600)
+	migrateCFStateFor(dest, "ncv")
+	if _, e := os.Stat(filepath.Join(dest, "state.json")); e == nil {
+		t.Fatal("NCV migrated CF task")
+	}
+	migrateCFStateFor(dest, "cf-vps")
+	raw, _ := os.ReadFile(filepath.Join(dest, "state.json"))
+	if string(raw) != string(cf) {
+		t.Fatal("CF checkpoint not copied")
+	}
+	raw, _ = os.ReadFile(filepath.Join(old, "state.json"))
+	if string(raw) != string(other) {
+		t.Fatal("NCV checkpoint modified")
+	}
+	os.WriteFile(filepath.Join(dest, "state.json"), other, 0600)
+	migrateCFStateFor(dest, "cf-vps")
+	raw, _ = os.ReadFile(filepath.Join(dest, "state.json"))
+	if string(raw) != string(other) {
+		t.Fatal("Existing destination overwritten")
 	}
 }

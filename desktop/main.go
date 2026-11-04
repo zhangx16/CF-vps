@@ -26,7 +26,7 @@ import (
 
 //go:embed ui/*
 var assets embed.FS
-var version = "0.2.0-beta.1"
+var version = "0.2.0-beta.2"
 
 func reply(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -70,11 +70,14 @@ func (a *App) handler() http.Handler {
 					stable++
 				}
 			}
+			if a.skipTCP() {
+				passed = len(a.state.Candidates)
+			}
 			templates := append([]Template(nil), a.state.Templates...)
 			for i := range templates {
 				templates[i].Link = ""
 			}
-			reply(w, map[string]any{"version": version, "name": a.state.Name, "status": a.state.Status, "error": a.state.Error, "total": len(a.state.Candidates), "tcp_done": done, "tcp_passed": passed, "proxy_total": passed * len(templates), "proxy_done": len(a.state.Results), "passed": stable, "templates": templates, "site_kind": a.state.SiteKind, "site": a.state.Site, "job": a.state.Job, "options": a.state.Options})
+			reply(w, map[string]any{"project": a.projectKind(), "tcp_skipped": a.skipTCP(), "version": version, "name": a.state.Name, "status": a.state.Status, "error": a.state.Error, "total": len(a.state.Candidates), "tcp_done": done, "tcp_passed": passed, "proxy_total": passed * len(templates), "proxy_done": len(a.state.Results), "passed": stable, "templates": templates, "site_kind": a.state.SiteKind, "site": a.state.Site, "job": a.state.Job, "options": a.state.Options})
 			a.mu.Unlock()
 			return
 		case "/api/results":
@@ -125,7 +128,10 @@ func (a *App) handler() http.Handler {
 			if err = decode(w, r, &q); err != nil {
 				break
 			}
-			if q.SiteKind != "" && q.SiteKind != "ncv" && q.SiteKind != "cf-vps" {
+			if q.SiteKind == "" {
+				q.SiteKind = a.projectKind()
+			}
+			if q.SiteKind != a.projectKind() {
 				err = errors.New("不支持的网站类型")
 				break
 			}
@@ -133,13 +139,16 @@ func (a *App) handler() http.Handler {
 				err = errors.New("请先关闭 TUN/VPN，或确认候选地址已排除代理")
 				break
 			}
-			if q.Options.TCPConcurrency < 1 || q.Options.TCPConcurrency > 1000 || q.Options.ProxyConcurrency < 1 || q.Options.ProxyConcurrency > 50 || q.Options.Timeout < 1 || q.Options.Timeout > 30 || q.Options.Attempts < 1 || q.Options.Attempts > 5 {
+			if (!a.skipTCP() && (q.Options.TCPConcurrency < 1 || q.Options.TCPConcurrency > 1000)) || q.Options.ProxyConcurrency < 1 || q.Options.ProxyConcurrency > 50 || q.Options.Timeout < 1 || q.Options.Timeout > 30 || q.Options.Attempts < 1 || q.Options.Attempts > 5 {
 				err = errors.New("并发、超时或复测次数超出范围")
 				break
 			}
 			if q.Options.Target != "https://www.gstatic.com/generate_204" && q.Options.Target != "https://www.cloudflare.com/cdn-cgi/trace" {
 				err = errors.New("不支持的测试目标")
 				break
+			}
+			if a.skipTCP() {
+				q.Options.TCPConcurrency = 0
 			}
 			if len(q.Templates) == 0 || len(q.Templates) > 10 {
 				err = errors.New("请提供 1–10 个节点模板")
@@ -253,6 +262,13 @@ func (a *App) handler() http.Handler {
 				break
 			}
 			var value any
+			if q.Kind == "" {
+				q.Kind = a.projectKind()
+			}
+			if q.Kind != a.projectKind() {
+				err = errors.New("请使用对应项目的电脑程序")
+				break
+			}
 			value, err = a.syncSite(q.Site, q.User, q.Password, q.Action, q.Job, q.Kind)
 			if err == nil {
 				reply(w, value)
@@ -305,7 +321,12 @@ func main() {
 	noOpen := flag.Bool("no-open", false, "Do not open browser")
 	coreFlag := flag.String("core", "", "Xray executable")
 	dataFlag := flag.String("data", "", "Data directory")
-	listenFlag := flag.String("listen", "127.0.0.1:49783", "Loopback address (port 0 for tests)")
+	dataName, defaultListen := "NCV-Desktop", "127.0.0.1:49783"
+	if defaultProject == "cf-vps" {
+		dataName = "CF-VPS-Desktop"
+		defaultListen = "127.0.0.1:49784"
+	}
+	listenFlag := flag.String("listen", defaultListen, "Loopback address (port 0 for tests)")
 	flag.Parse()
 	exe, _ := os.Executable()
 	core := filepath.Join(filepath.Dir(exe), "core", "xray.exe")
@@ -318,7 +339,7 @@ func main() {
 	dir := *dataFlag
 	if dir == "" {
 		base, _ := os.UserConfigDir()
-		dir = filepath.Join(base, "NCV-Desktop")
+		dir = filepath.Join(base, dataName)
 	}
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		panic(e)
@@ -345,7 +366,8 @@ func main() {
 		ln.Close()
 		panic("Only loopback is allowed")
 	}
-	a := &App{dir: dir, core: core, token: hex.EncodeToString(secret)}
+	migrateCFState(dir)
+	a := &App{project: defaultProject, dir: dir, core: core, token: hex.EncodeToString(secret)}
 	a.load()
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
