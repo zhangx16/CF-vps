@@ -125,7 +125,7 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/cf-vps
 UMask=0077
-LimitNOFILE=4096
+LimitNOFILE=16384
 [Install]
 WantedBy=multi-user.target
 EOF

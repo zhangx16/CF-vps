@@ -78,8 +78,8 @@ def prepare(raw):
     if not isinstance(adaptive,bool):
         raise ValueError('自适应并发必须是布尔值')
     minimum = max(1,min(int(raw.get('min_concurrency',10)),concurrency))
-    if not 1 <= concurrency <= 1000 or not math.isfinite(timeout) or not 0.5 <= timeout <= 30 or not 1 <= attempts <= 3:
-        raise ValueError('并发 1–1000，超时 0.5–30 秒，尝试次数 1–3')
+    if not 1 <= concurrency <= 5000 or not math.isfinite(timeout) or not 0.5 <= timeout <= 30 or not 1 <= attempts <= 3:
+        raise ValueError('并发 1–5000，超时 0.5–30 秒，尝试次数 1–3')
     if not math.isfinite(rps) or not 1 <= rps <= 1000:
         raise ValueError('每秒请求上限应在 1–1000')
     total = sum(n.num_addresses if n.prefixlen >= 31 else n.num_addresses - 2 for n in nets) * len(ports)

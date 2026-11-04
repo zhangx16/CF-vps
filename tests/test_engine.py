@@ -32,11 +32,11 @@ class EngineTests(unittest.TestCase):
                 prepare(raw)
 
     def test_concurrency_upper_bound(self):
-        for value in [300,301,1000]:
-            config=prepare({'targets':'8.8.8.8','concurrency':value,'min_concurrency':1000})
+        for value in [300,1000,1001,5000]:
+            config=prepare({'targets':'8.8.8.8','concurrency':value,'min_concurrency':5000})
             self.assertEqual(config['concurrency'],value)
             self.assertEqual(config['min_concurrency'],value)
-        for value in [0,1001]:
+        for value in [0,5001]:
             with self.assertRaises(ValueError):prepare({'targets':'8.8.8.8','concurrency':value})
 
     def test_stop_resume_skips_nonhits_and_recovers_restart(self):
