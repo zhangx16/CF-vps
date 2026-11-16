@@ -139,6 +139,8 @@ def make_handler(manager, password, providers=None):
                     self.reply(200, (ROOT / 'static' / name).read_bytes(), kind)
                 elif parsed.path == '/api/jobs':
                     self.reply(200, manager.jobs())
+                elif parsed.path == '/api/accuracy':
+                    self.reply(200,{'report':manager.accuracy.get(query.get('id',[''])[0])})
                 elif parsed.path == '/api/job':
                     self.reply(200,manager.job_detail(query.get('id',[''])[0]))
                 elif parsed.path == '/api/results':
@@ -228,6 +230,8 @@ def make_handler(manager, password, providers=None):
                         provider,networks=providers.resolve(raw['provider'],raw.get('prefixes'))
                         raw.update(targets='\n'.join(networks),provider_name=provider['name'],provider_asns=provider['asns'],provider_updated_at=provider['updated_at'],provider_country=provider.get('country',''))
                     self.reply(200, {'id': manager.start(raw)})
+                elif path == '/api/accuracy-start':
+                    self.reply(200,manager.accuracy.start(raw.get('id'),raw.get('size',64)))
                 elif path == '/api/provider-refresh':
                     providers.refresh(raw.get('id',''))
                     self.reply(200,{'ok':True})
@@ -257,7 +261,10 @@ def make_handler(manager, password, providers=None):
                 elif path == '/api/favorite':
                     self.reply(200,manager.favorite(raw.get('ip'),raw.get('port'),raw.get('enabled')))
                 elif path == '/api/stop':
-                    manager.stop()
+                    ident = raw.get('id')
+                    if not isinstance(ident, str) or not ident:
+                        raise ValueError('缺少任务 ID')
+                    manager.stop(ident)
                     self.reply(200, {'ok': True})
                 else:
                     self.reply(404, {'error': '未找到'})
@@ -294,8 +301,7 @@ def main():
         server.serve_forever()
     finally:
         manager.stop()
-        if manager.thread:
-            manager.thread.join(timeout=100)
+        manager.join(timeout=100)
         server.server_close()
 
 

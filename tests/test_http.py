@@ -51,6 +51,19 @@ class DashboardTests(unittest.TestCase):
         conn.close()
         return result
 
+    def test_accuracy_routes_require_auth_and_csrf(self):
+        self.assertEqual(self.request('GET','/api/accuracy?id=missing',auth=False)[0],401)
+        status,_,body=self.request('GET','/api/accuracy?id=missing')
+        self.assertEqual(status,200)
+        self.assertIsNone(json.loads(body)['report'])
+        self.assertEqual(self.request('POST','/api/accuracy-start',{'id':'missing'},csrf=False)[0],403)
+        self.assertEqual(self.request('POST','/api/accuracy-start',{'id':'missing'})[0],400)
+        with patch.object(self.manager.accuracy,'start',return_value={'id':'audit','status':'running'}) as start:
+            status,_,body=self.request('POST','/api/accuracy-start',{'id':'job','size':64})
+            self.assertEqual(status,200)
+            self.assertEqual(json.loads(body)['status'],'running')
+            start.assert_called_once_with('job',64)
+
     def test_auth_csrf_and_static(self):
         self.assertEqual(self.request('GET', '/api/jobs', auth=False)[0], 401)
         self.assertEqual(self.request('GET', '/app.js', auth=False)[0], 401)
@@ -70,8 +83,9 @@ class DashboardTests(unittest.TestCase):
             status, _, body = self.request('POST', '/api/start', {'targets':'8.8.8.0/30','ports':'443','concurrency':1,'task_name':'香港晚间测试'})
             self.assertEqual(status, 200)
             ident = json.loads(body)['id']
-            self.assertEqual(self.request('POST', '/api/start', {'targets':'8.8.8.8'})[0], 400)
-            self.manager.thread.join(5)
+            self.assertEqual(self.request('POST', '/api/start', {'targets':'8.8.8.8'})[0], 200)
+            self.assertEqual(self.request('POST', '/api/stop', {})[0], 400)
+            self.manager.join(5)
         result = self.request('GET', f'/api/results?id={ident}&view=verified')
         self.assertEqual(json.loads(result[2])['total'], 2)
         status, headers, body = self.request('GET', f'/api/export?id={ident}&view=all')
@@ -105,7 +119,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('测试结果-job12345.csv',unquote(csv_disposition('job12345',{})))
 
     def test_provider_selection_and_adaptive_settings(self):
-        self.assertEqual(len(json.loads(self.request('GET','/api/providers')[2])),5)
+        self.assertEqual(len(json.loads(self.request('GET','/api/providers')[2])),2)
+        self.providers.state['cache'].pop('bwh')
         self.assertEqual(self.request('POST','/api/start',{'provider':'bwh'})[0],400)
         self.assertEqual(len(self.manager.jobs()),0)
         self.providers.state['cache']['bwh']=dict(networks=['8.8.8.0/30'],updated_at=123,source='fixture')

@@ -2,6 +2,7 @@ import base64
 import http.client
 import json
 import tempfile
+import time
 import threading
 import unittest
 from urllib.parse import unquote
@@ -19,7 +20,7 @@ class LocalValidationTests(unittest.TestCase):
                 db.execute("INSERT INTO jobs(id,created,updated,status,config,total,done,hits) VALUES(?,1,1,'completed',?,2,2,2)",(job,json.dumps(config)))
                 for port in [443,8443]:
                     data=dict(ip='8.8.8.8',port=port,status='hit',evidence='suspected',latency_ms=12)
-                    db.execute('INSERT INTO results(job,ip,port,status,latency,data,ip_num) VALUES(?,?,?,?,?,?,?)',(job,'8.8.8.8',port,'hit',12,json.dumps(data),134744072))
+                    db.execute('INSERT INTO results(job,ip,port,status,latency,data,ip_num,observed,evidence) VALUES(?,?,?,?,?,?,?,?,?)',(job,'8.8.8.8',port,'hit',12,json.dumps(data),134744072,time.time(),'suspected'))
         self.server=ThreadingHTTPServer(('127.0.0.1',0),make_handler(self.manager,'fixture-password-12345'))
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
     def tearDown(self):

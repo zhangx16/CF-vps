@@ -136,7 +136,8 @@ class HistoryTests(unittest.TestCase):
             self.assertTrue(second_started.wait(2))
             time.sleep(.7)
             with connect(self.path) as db:
-                self.assertEqual(db.execute('SELECT COUNT(*) FROM results WHERE job=?',(ident,)).fetchone()[0],1)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM scan_progress WHERE job=?',(ident,)).fetchone()[0],1)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM results WHERE job=?',(ident,)).fetchone()[0],0)
             self.manager.thread.join(5)
 
     def test_legacy_migration_does_not_claim_strict_confirmation(self):
@@ -149,8 +150,8 @@ class HistoryTests(unittest.TestCase):
         db.commit();db.close()
         self.manager=Manager(self.path)
         self.assertEqual(self.manager.results('old','verified')['total'],0)
-        self.assertEqual(self.manager.results('old','legacy')['total'],1)
-        self.assertEqual(self.manager.facets('old')['regions'][0]['value'],'US')
+        self.assertEqual(self.manager.results('old','legacy')['total'],0)
+        self.assertEqual(self.manager.facets('old')['regions'],[])
 
     def test_connection_is_closed_on_exit(self):
         with connect(self.path) as db:db.execute('SELECT 1')

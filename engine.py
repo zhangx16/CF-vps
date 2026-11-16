@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 
 from probing import probe
+from diagnostics import classify
+from collections import Counter
 from adaptive import AdaptiveLimiter
 from providers import normalize
 
@@ -39,6 +41,31 @@ def connect(path, favorites=False):
             yield db
     finally:
         db.close()
+
+
+def prune_retention(path, now=None):
+    """Keep only hits younger than 24h, including all independent result copies."""
+    cutoff = (time.time() if now is None else now) - 86400
+    with connect(path) as db:
+        db.execute('PRAGMA secure_delete=ON')
+        db.execute('CREATE TABLE IF NOT EXISTS scan_progress (job TEXT, ip TEXT, port INTEGER, observed REAL, PRIMARY KEY(job,ip,port))')
+        # Migrate only recent unfinished checkpoints before deleting failure payloads.
+        db.execute("INSERT OR IGNORE INTO scan_progress SELECT job,ip,port,observed FROM results WHERE observed>? AND job IN (SELECT id FROM jobs WHERE status!='completed')", (cutoff,))
+        for table, condition, args in [
+            ('results', "status IS NOT 'hit' OR COALESCE(observed,0)<=?", (cutoff,)),
+            ('observations', 'hit IS NOT 1 OR COALESCE(observed,0)<=?', (cutoff,)),
+            ('favorite_snapshots', "status IS NOT 'hit' OR COALESCE(observed,0)<=?", (cutoff,)),
+            ('scan_progress', "COALESCE(observed,0)<=? OR job IN (SELECT id FROM jobs WHERE status='completed')", (cutoff,)),
+        ]:
+            while True:
+                changed = db.execute(f'DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {condition} LIMIT 2000)', args).rowcount
+                db.commit()
+                if changed < 2000:
+                    break
+        db.execute('DELETE FROM confirmed_nodes WHERE NOT EXISTS (SELECT 1 FROM results r WHERE r.job=confirmed_nodes.job AND r.ip=confirmed_nodes.ip AND r.port=confirmed_nodes.port)')
+        db.execute('DELETE FROM endpoint_favorites WHERE NOT EXISTS (SELECT 1 FROM results r WHERE r.ip=endpoint_favorites.ip AND r.port=endpoint_favorites.port) AND NOT EXISTS (SELECT 1 FROM favorite_snapshots s WHERE s.ip=endpoint_favorites.ip AND s.port=endpoint_favorites.port)')
+        db.execute('DELETE FROM favorites')
+        db.execute('DELETE FROM accuracy_reports WHERE created<=?',(cutoff,))
 
 
 def prepare(raw):
@@ -78,8 +105,8 @@ def prepare(raw):
     if not isinstance(adaptive,bool):
         raise ValueError('自适应并发必须是布尔值')
     minimum = max(1,min(int(raw.get('min_concurrency',10)),concurrency))
-    if not 1 <= concurrency <= 5000 or not math.isfinite(timeout) or not 0.5 <= timeout <= 30 or not 1 <= attempts <= 3:
-        raise ValueError('并发 1–5000，超时 0.5–30 秒，尝试次数 1–3')
+    if concurrency < 1 or not math.isfinite(timeout) or not 0.5 <= timeout <= 30 or not 1 <= attempts <= 3:
+        raise ValueError('并发为正整数，超时 0.5–30 秒，尝试次数 1–3')
     if not math.isfinite(rps) or not 1 <= rps <= 2000:
         raise ValueError('每秒请求上限应在 1–2000')
     total = sum(n.num_addresses if n.prefixlen >= 31 else n.num_addresses - 2 for n in nets) * len(ports)
@@ -103,16 +130,23 @@ class RateLimiter:
         self.next = 0
         self.lock = asyncio.Lock()
         self.stop = stop
+        self.capacity = max(1, rps * .01)
+        self.tokens = self.capacity
+        self.updated = time.monotonic()
 
     async def wait(self):
+        # A 10ms bucket avoids serial sub-millisecond timer rounding at high rates.
         async with self.lock:
-            while time.monotonic() < self.next:
+            while True:
                 if self.stop():
                     raise asyncio.CancelledError()
-                await asyncio.sleep(min(.1, self.next - time.monotonic()))
-            if self.stop():
-                raise asyncio.CancelledError()
-            self.next = time.monotonic() + self.interval
+                now = time.monotonic()
+                self.tokens = min(self.capacity, self.tokens + (now-self.updated)/self.interval)
+                self.updated = now
+                if self.tokens >= 1:
+                    self.tokens -= 1
+                    return
+                await asyncio.sleep(min(.1, (1-self.tokens)*self.interval))
 
 
 class Manager:
@@ -125,11 +159,15 @@ class Manager:
         self.active = None
         self.live = {}
         self.controller = None
+        self.runners = {}
+        from accuracy import AccuracyAudit
+        self.accuracy = AccuracyAudit(self)
         text=(ROOT/'dmit_prefixes.txt').read_text()
         self.builtin_networks=set(normalize([line.split('#',1)[0].strip() for line in text.splitlines() if line.split('#',1)[0].strip()]))
         with connect(self.path) as db:
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
+                CREATE TABLE IF NOT EXISTS job_diagnostics (job TEXT, category TEXT, count INTEGER NOT NULL, updated REAL, PRIMARY KEY(job,category));
                 CREATE TABLE IF NOT EXISTS confirmed_nodes (job TEXT, ip TEXT, port INTEGER, created REAL, updated REAL, PRIMARY KEY(job,ip,port));
                 CREATE TABLE IF NOT EXISTS favorites (ip TEXT PRIMARY KEY, created REAL);
                 CREATE TABLE IF NOT EXISTS endpoint_favorites (ip TEXT, port INTEGER, created REAL, PRIMARY KEY(ip,port));
@@ -170,7 +208,7 @@ class Manager:
                 CREATE INDEX IF NOT EXISTS result_global_status ON results(status,loc);
             ''')
             db.execute("UPDATE jobs SET status='interrupted', updated=? WHERE status IN ('running','stopping')", (time.time(),))
-        self.prune_completed_nonhits()
+        prune_retention(self.path)
 
     def prune_completed_nonhits(self, ident=None):
         """Remove failure payloads/checkpoints only after a task is complete."""
@@ -187,15 +225,21 @@ class Manager:
     def jobs(self):
         with connect(self.path) as db:
             rows = [dict(r) for r in db.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT 100')]
+            counts = {}
+            for r in db.execute('SELECT job,category,count FROM job_diagnostics'):
+                counts.setdefault(r['job'], {})[r['category']] = r['count']
+            for row in rows:
+                row['diagnostics'] = counts.get(row['id'], {})
         with self.lock:
             for row in rows:
                 row['config'] = self.source_config(json.loads(row['config']))
                 row['config'].pop('input_targets',None)
-                if row['id'] == self.active:
-                    row.update(self.live)
-                    if self.controller:
-                        row.update(self.controller.snapshot())
-                    if self.stop_event.is_set():
+                runtime = self.runners.get(row['id'])
+                if runtime:
+                    row.update(runtime['live'])
+                    if runtime.get('controller'):
+                        row.update(runtime['controller'].snapshot())
+                    if runtime['stop'].is_set():
                         row['status'] = 'stopping'
         return rows
 
@@ -331,16 +375,18 @@ class Manager:
 
     def start(self, raw=None, resume=None, retest=None):
         with self.lock:
-            if self.thread and self.thread.is_alive():
-                raise ValueError('已有任务正在运行，请先停止')
+            if resume in self.runners:
+                raise ValueError('该任务正在运行')
             now = time.time()
             with connect(self.path) as db:
                 if resume:
                     row = db.execute('SELECT * FROM jobs WHERE id=?', (resume,)).fetchone()
                     if row is None or row['status'] == 'completed':
                         raise ValueError('任务不存在或已完成')
+                    if row['created'] <= now - 86400:
+                        raise ValueError('任务已超过24小时保留期，请使用原IP段新建测试')
                     ident, config = resume, json.loads(row['config'])
-                    done, hits = db.execute("SELECT COUNT(*), COALESCE(SUM(status='hit'),0) FROM results WHERE job=?", (ident,)).fetchone()
+                    done, hits = row['done'], row['hits']
                     db.execute("UPDATE jobs SET status='running', error='', done=?, hits=?, updated=? WHERE id=?", (done, hits, now, ident))
                 else:
                     if retest:
@@ -375,17 +421,34 @@ class Manager:
                     done = hits = 0
                     db.execute('INSERT INTO jobs(id,created,updated,status,config,total) VALUES (?,?,?,?,?,?)',
                                (ident, now, now, 'running', json.dumps(config), config['total']))
-            self.stop_event.clear()
+            runtime = dict(stop=threading.Event(), live=dict(done=done, hits=hits, rate=0, eta=None),
+                           controller=None, source_id=config.get('source_id'))
+            self.runners[ident] = runtime
+            self.stop_event = runtime['stop']
             self.active = ident
-            self.live = dict(done=done, hits=hits, rate=0, eta=None)
             self.thread = threading.Thread(target=self._run, args=(ident, config, done, hits), daemon=True)
+            runtime['thread'] = self.thread
             self.thread.start()
             return ident
 
-    def stop(self):
+    def stop(self, ident=None):
+        if ident is None:
+            self.accuracy.cancel()
         with self.lock:
-            if self.thread and self.thread.is_alive():
-                self.stop_event.set()
+            if ident is not None and ident not in self.runners:
+                raise ValueError('该任务未在运行')
+            for job, runtime in self.runners.items():
+                if ident is None or job == ident:
+                    runtime['stop'].set()
+
+    def join(self, timeout=100):
+        with self.lock:
+            threads = [r['thread'] for r in self.runners.values()]
+        if self.accuracy.thread:
+            threads.append(self.accuracy.thread)
+        deadline = time.monotonic() + timeout
+        for thread in threads:
+            thread.join(max(0, deadline - time.monotonic()))
 
     def _run(self, ident, config, done, hits):
         try:
@@ -395,32 +458,43 @@ class Manager:
                 db.execute("UPDATE jobs SET status='failed', error=?, updated=? WHERE id=?", (str(exc)[:1000], time.time(), ident))
         finally:
             with self.lock:
-                self.active = None
-                self.live = {}
-                self.controller = None
+                self.runners.pop(ident, None)
+                if self.active == ident:
+                    self.active = next(iter(self.runners), None)
 
     async def _scan(self, ident, config, done, hits):
+        runtime = self.runners[ident]
+        stop_event = runtime['stop']
         db = open_db(self.path)
         initial_done = done
         started = time.monotonic()
+        source_db = open_db(self.path) if config.get('kind') == 'retest' and 'selected' not in config else None
         if config.get('kind') == 'retest':
-            iterator = iter(config['selected']) if 'selected' in config else ((r['ip'],r['port']) for r in db.execute("SELECT ip,port FROM results WHERE job=? AND status='hit' ORDER BY rowid", (config['source_id'],)))
+            iterator = iter(config['selected']) if 'selected' in config else ((r['ip'],r['port']) for r in source_db.execute("SELECT ip,port FROM results WHERE job=? AND status='hit' ORDER BY rowid", (config['source_id'],)))
         else:
             iterator = targets(config)
         sem = asyncio.Semaphore(config['concurrency'])
-        limiter = RateLimiter(config.get('rps',100), self.stop_event.is_set)
+        limiter = RateLimiter(config.get('rps',100), stop_event.is_set)
         pending = 0
+        writes = []
+        diagnostics = Counter()
         finished = asyncio.Event()
         controller = AdaptiveLimiter(config['concurrency'],config.get('min_concurrency',10),config.get('adaptive',True))
         await controller.update()
         with self.lock:
-            self.controller = controller
+            runtime['controller'] = controller
 
         def save():
             nonlocal pending
             if pending:
+                for sql, values in writes:
+                    db.execute(sql, values)
+                for category, count in diagnostics.items():
+                    db.execute('INSERT INTO job_diagnostics VALUES (?,?,?,?) ON CONFLICT(job,category) DO UPDATE SET count=count+excluded.count,updated=excluded.updated', (ident,category,count,time.time()))
                 db.execute('UPDATE jobs SET done=?, hits=?, updated=? WHERE id=?', (done,hits,time.time(),ident))
                 db.commit()
+                writes.clear()
+                diagnostics.clear()
                 pending = 0
 
         async def commit_timer():
@@ -440,17 +514,17 @@ class Manager:
         async def worker():
             nonlocal done, hits, pending
             for ip, port in iterator:
-                if self.stop_event.is_set():
+                if stop_event.is_set():
                     return
-                if db.execute('SELECT 1 FROM results WHERE job=? AND ip=? AND port=?', (ident,ip,port)).fetchone():
+                if db.execute('SELECT 1 FROM scan_progress WHERE job=? AND ip=? AND port=?', (ident,ip,port)).fetchone():
                     continue
                 try:
-                    async with controller.slot(self.stop_event.is_set):
+                    async with controller.slot(stop_event.is_set):
                         result = await probe(ip, port, config['timeout'], sem,
                                              attempts=config.get('attempts',1), pace=limiter.wait,
-                                             stopping=self.stop_event.is_set)
+                                             stopping=stop_event.is_set)
                 except asyncio.CancelledError:
-                    if self.stop_event.is_set():
+                    if stop_event.is_set():
                         return  # Incomplete observations are deliberately not checkpointed.
                     raise
                 observed = time.time()
@@ -458,21 +532,24 @@ class Manager:
                 latency = result.get('request_ms', result.get('latency_ms'))
                 if latency == '':
                     latency = None
-                db.execute('INSERT INTO results(job,ip,port,status,verified,latency,data,evidence,colo,loc,observed,ip_num) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-                           (ident,ip,port,result['status'],result.get('verified',''),latency,json.dumps(result),
-                            result.get('evidence','suspected'),result.get('colo',''),result.get('loc',''),observed,int(ipaddress.ip_address(ip))))
-                db.execute('INSERT INTO observations VALUES (?,?,?,?,?,?)',
-                           (ident,ip,port,observed,int(result['status']=='hit'),int(result.get('evidence')=='dual_verified')))
+                writes.append(('INSERT INTO scan_progress VALUES (?,?,?,?)', (ident,ip,port,observed)))
+                if result['status'] == 'hit':
+                    writes.append(('INSERT INTO results(job,ip,port,status,verified,latency,data,evidence,colo,loc,observed,ip_num) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                               (ident,ip,port,result['status'],result.get('verified',''),latency,json.dumps(result),
+                                result.get('evidence','suspected'),result.get('colo',''),result.get('loc',''),observed,int(ipaddress.ip_address(ip)))))
+                    writes.append(('INSERT INTO observations VALUES (?,?,?,?,?,?)',
+                               (ident,ip,port,observed,int(result['status']=='hit'),int(result.get('evidence')=='dual_verified'))))
                 done += 1
                 hits += result['status'] == 'hit'
                 pending += 1
+                diagnostics.update(classify(result))
                 elapsed = max(time.monotonic()-started,.001)
                 rate = (done-initial_done)/elapsed
                 with self.lock:
-                    self.live = dict(done=done,hits=hits,rate=round(rate,2),eta=round((config['total']-done)/rate) if rate else None)
+                    runtime['live'] = dict(done=done,hits=hits,rate=round(rate,2),eta=round((config['total']-done)/rate) if rate else None)
                 if pending >= 50:
                     save()
-        tasks = [asyncio.create_task(worker()) for _ in range(config['concurrency'])]
+        tasks = [asyncio.create_task(worker()) for _ in range(min(config['concurrency'], max(0, config['total'] - initial_done)))]
         timer = asyncio.create_task(commit_timer())
         resource_task = asyncio.create_task(resource_monitor())
         try:
@@ -482,6 +559,8 @@ class Manager:
             db.execute('UPDATE jobs SET status=?,updated=? WHERE id=?', (status,time.time(),ident))
             db.commit()
             if status == 'completed':
+                with connect(self.path) as progress_db:
+                    progress_db.execute('DELETE FROM scan_progress WHERE job=?', (ident,))
                 self.prune_completed_nonhits(ident)
         except BaseException:
             for task in tasks:
@@ -495,6 +574,8 @@ class Manager:
                 await asyncio.gather(timer,resource_task)
             finally:
                 db.close()
+                if source_db:
+                    source_db.close()
 
     @staticmethod
     def condition(ident, view='hits', region='', colo='', search=''):
@@ -571,15 +652,18 @@ class Manager:
 
     def delete(self, ident):
         with self.lock:
-            if self.thread and self.thread.is_alive():
-                with connect(self.path) as db:
-                    row = db.execute('SELECT config FROM jobs WHERE id=?',(self.active,)).fetchone()
-                    if ident == self.active or row and json.loads(row['config']).get('source_id') == ident:
-                        raise ValueError('请先停止相关任务')
+            if self.accuracy.thread and self.accuracy.thread.is_alive() and self.accuracy.live['job'] == ident:
+                raise ValueError('请先等待并发对照结束')
+            if any(ident == job or runtime.get('source_id') == ident
+                   for job, runtime in self.runners.items()):
+                raise ValueError('请先停止相关任务')
             with connect(self.path) as db:
                 db.execute('DELETE FROM confirmed_nodes WHERE job=?',(ident,))
                 db.execute('DELETE FROM observations WHERE job=?',(ident,))
                 db.execute('DELETE FROM results WHERE job=?',(ident,))
+                db.execute('DELETE FROM scan_progress WHERE job=?',(ident,))
+                db.execute('DELETE FROM job_diagnostics WHERE job=?',(ident,))
+                db.execute('DELETE FROM accuracy_reports WHERE job=?',(ident,))
                 db.execute('DELETE FROM jobs WHERE id=?',(ident,))
 
     def compare(self, old, new, kind='new'):

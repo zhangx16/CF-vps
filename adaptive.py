@@ -76,6 +76,7 @@ class AdaptiveLimiter:
         self.enabled=enabled
         self.limit=self.ceiling
         self.active=0
+        self.audit_limit=None
         self.reason='固定并发' if not enabled else '初始化资源评估'
         self.metrics={}
         self.healthy=0
@@ -116,13 +117,13 @@ class AdaptiveLimiter:
             self.limit=target;self.reason=reason;self.condition.notify_all()
 
     def snapshot(self):
-        return dict(adaptive=self.enabled,effective_concurrency=self.limit,concurrency_ceiling=self.ceiling,
+        return dict(adaptive=self.enabled,effective_concurrency=min(self.limit,self.audit_limit) if self.audit_limit is not None else self.limit,concurrency_ceiling=self.ceiling,
                     inflight=self.active,concurrency_reason=self.reason,resources=dict(self.metrics))
 
     @asynccontextmanager
     async def slot(self, stopping):
         async with self.condition:
-            while self.active>=self.limit:
+            while self.active>=min(self.limit,self.audit_limit if self.audit_limit is not None else self.limit):
                 if stopping():raise asyncio.CancelledError()
                 try:await asyncio.wait_for(self.condition.wait(),.25)
                 except asyncio.TimeoutError:pass
@@ -131,4 +132,7 @@ class AdaptiveLimiter:
         try:yield
         finally:
             async with self.condition:
-                self.active-=1;self.condition.notify_all()
+                # One completed probe frees one slot. Waking every waiter here
+                # makes a throttled high-concurrency scan spend CPU repeatedly
+                # rescheduling thousands of probes that still cannot enter.
+                self.active-=1;self.condition.notify(1)

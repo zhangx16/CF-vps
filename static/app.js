@@ -28,10 +28,9 @@ function options(select, values, title, formatter=v=>v) {
 function resultId(){return window.resultCenter?.active?$('catalog-job').value||'*':selected;}
 function resultProvider(){return window.resultCenter?.active?$('catalog-provider').value:'';}
 function selectionState() {
-  const active=records.some(j=>['running','stopping'].includes(j.status));
-  $('retest-selected').disabled=busy||active||!checked.size||resultId()==='*';
+  $('retest-selected').disabled=busy||!checked.size||resultId()==='*';
   const contextJob=records.find(j=>j.id===resultId())||window.resultCenter?.jobs.find(j=>j.id===resultId());
-  $('retest-all').disabled=busy||active||!contextJob?.hits||resultId()==='*';
+  $('retest-all').disabled=busy||!contextJob?.hits||resultId()==='*';
   document.body.classList.toggle('center-all',Boolean(window.resultCenter?.active&&resultId()==='*'));
   $('selection-count').textContent=`已选 ${checked.size} 个`;
   $('select-all').checked=visible.length>0&&visible.every(r=>checked.has(`${r.ip}:${r.port}`));
@@ -47,13 +46,12 @@ function renderJobs() {
   }
   $('jobs').value=selected;rememberJob();
   const pending=records.find(j=>j.id===selected&&['stopped','interrupted','failed'].includes(j.status))||records.filter(j=>['stopped','interrupted','failed'].includes(j.status)).sort((a,b)=>b.updated-a.updated)[0];
-  const hasActive=records.some(j=>['running','stopping'].includes(j.status));
-  $('resume-notice').hidden=!pending||hasActive;
+  $('resume-notice').hidden=!pending;
   if(pending){$('resume-notice-detail').textContent=`${pending.config.task_name?pending.config.task_name+' · ':''}${pending.config.provider_name||'目标快照'} · 已完成 ${pending.done.toLocaleString()} / ${pending.total.toLocaleString()} 次；保留原参数并跳过已完成目标。`;$('resume-last').dataset.id=pending.id;$('view-last').dataset.id=pending.id;}
-  $('resume-last').disabled=busy||hasActive;
+  $('resume-last').disabled=busy;
   if(!$('compare-old').dataset.initialized&&records.length>=2) { $('compare-old').value=records[1].id;$('compare-new').value=records[0].id;$('compare-old').dataset.initialized='1'; }
-  const j=records.find(j=>j.id===selected),active=records.some(j=>['running','stopping'].includes(j.status));
-  $('start').disabled=active||busy;$('stop').disabled=!active||busy;$('resume').disabled=active||!j||j.status==='completed'||busy;
+  const j=records.find(j=>j.id===selected),active=j&&['running','stopping'].includes(j.status);
+  $('start').disabled=busy;$('stop').disabled=!active||busy;$('resume').disabled=active||!j||j.status==='completed'||busy;
   $('delete-job').disabled=active||!j||busy;
   selectionState();
   if(!j) { $('rows').replaceChildren();$('status').textContent='等待任务';$('percent').textContent='—';$('hits').textContent='0';$('progress').value=0;$('eta').textContent='—';$('rate').textContent='—';$('detail').textContent='创建任务后，进度每两秒更新。';$('error').textContent='';return; }
@@ -110,6 +108,7 @@ async function refresh() {
     if(window.resultCenter)await window.resultCenter.refreshMeta();
     if(resultId()) { const id=resultId(),view=$('view').value,provider=resultProvider();const facets=await api('/api/facets?'+new URLSearchParams({id,view,provider,favorites:window.resultCenter?.favorites?'1':''}));
       if(id===resultId()&&view===$('view').value){options($('region'),facets.regions,'全部地区',regionName);options($('colo'),facets.colos,'全部机房');if(window.resultCenter?.pendingRegion){$('region').value=window.resultCenter.pendingRegion;window.resultCenter.pendingRegion='';}} }
+    await renderDiagnostics();
     await renderTaskTargets();
     await renderResults();
   } catch(e){message(e);}finally{polling=false;}
@@ -130,7 +129,7 @@ $('scan-form').onsubmit=e=>{e.preventDefault();action('/api/start',{task_name:$(
 function viewPending(id){if(window.resultCenter?.active)window.resultCenter.exit();selected=id;rememberJob();resetPage();checked.clear();renderJobs();refresh();$('overview').scrollIntoView();}
 $('resume-last').onclick=()=>{const id=$('resume-last').dataset.id;viewPending(id);action('/api/resume',{id});};
 $('view-last').onclick=()=>viewPending($('view-last').dataset.id);
-$('stop').onclick=()=>action('/api/stop',{});$('resume').onclick=()=>action('/api/resume',{id:selected});
+$('stop').onclick=()=>action('/api/stop',{id:selected});$('resume').onclick=()=>action('/api/resume',{id:selected});
 $('delete-job').onclick=()=>{if(confirm('删除此任务及其探测记录？此操作不能撤销。'))action('/api/delete',{id:selected});};
 $('retest-selected').onclick=()=>action('/api/retest',{id:resultId(),selected:[...checked.values()]});$('retest-all').onclick=()=>action('/api/retest',{id:resultId()});
 $('select-all').onchange=()=>{for(const r of visible){const key=`${r.ip}:${r.port}`;if($('select-all').checked)checked.set(key,{ip:r.ip,port:r.port});else checked.delete(key);}renderResults().catch(message);};
@@ -230,3 +229,35 @@ $('local-confirmed').addEventListener('toggle',()=>{if($('local-confirmed').open
 
 function resultExportName(){const id=resultId();if(id==='*')return window.resultCenter?.favorites?'收藏夹':'全部测试结果';const item=window.resultCenter?.jobs.find(j=>j.id===id);return item?.task_name||jobs.find(j=>j.id===id)?.config?.task_name||item?.provider_name||'测试结果';}
 function safeTextFilename(name){return ([...(name||'测试结果').replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g,'_').replace(/^[ .]+|[ .]+$/g,'')].slice(0,100).join('')||'测试结果')+'.txt';}
+
+
+// Failure addresses are not retained; diagnostics are aggregate counts only.
+const diagnosticLabels={hit:'命中',connection_refused:'连接拒绝',connect_timeout:'TCP超时（未判定）',tls_timeout:'TLS超时（未判定）',http_timeout:'HTTP超时（未判定）',tls_error:'TLS失败（未判定）',http_error:'HTTP异常（未判定）',connect_error:'网络错误（未判定）',open_not_cf:'响应未发现CF特征',unknown_error:'其他失败（未判定）',verify_connect_timeout:'第二域名TCP超时',verify_tls_timeout:'第二域名TLS超时',verify_http_timeout:'第二域名HTTP超时',verify_tls_error:'第二域名TLS失败',verify_http_error:'第二域名HTTP异常',verify_connect_error:'第二域名网络错误',verify_connection_refused:'第二域名连接拒绝',verify_unknown_error:'第二域名未知错误',verify_not_confirmed:'第二域名未确认',verify_confirmed:'双域名确认'};
+function diagnosisText(counts){return Object.entries(counts||{}).map(([key,value])=>`${diagnosticLabels[key]||key} ${Number(value).toLocaleString()}`).join(' · ');}
+async function renderDiagnostics(){
+  let panel=$('diagnostic-panel');
+  if(!panel){panel=document.createElement('details');panel.id='diagnostic-panel';panel.className='evidence';const summary=document.createElement('summary');summary.textContent='失败原因统计与并发准确性对照';panel.append(summary);$('runtime').after(panel);}
+  const id=resultId();
+  if(!id||id==='*'){panel.hidden=true;return;}
+  panel.hidden=false;
+  const job=records.find(j=>j.id===id);
+  let content=$('diagnostic-content');if(!content){content=document.createElement('div');content.id='diagnostic-content';panel.append(content);}
+  const report=(await api('/api/accuracy?'+new URLSearchParams({id}))).report;
+  if(id!==resultId())return;
+  content.replaceChildren();
+  const add=text=>{const p=document.createElement('p');p.textContent=text;content.append(p);};
+  const counts=job?.diagnostics||{};
+  const covered=Object.entries(counts).filter(([key])=>!key.startsWith('verify_')).reduce((n,[,v])=>n+v,0);
+  add(covered?`按端点最终结果统计，已覆盖 ${covered.toLocaleString()} 次探测（历史未记录部分不补造）。${diagnosisText(counts)}`:'尚无新统计；旧数据未保存失败原因，不能回溯统计。');
+  add('超时和协议错误表示本次无法判断；连接拒绝只说明当时该端口拒绝连接；未发现CF特征不等于节点永久不可用。第二域名统计属于命中的子集，不重复计入总探测数。');
+  const button=document.createElement('button');button.type='button';button.textContent=report?.status==='running'?'并发对照进行中':'运行64端点低/高并发对照';button.disabled=report?.status==='running';
+  button.onclick=async()=>{button.disabled=true;try{await api('/api/accuracy-start',{id,size:64});await renderDiagnostics();}catch(e){message(e);button.disabled=false;}};content.append(button);
+  add('对同一批端点按低→高→高→低顺序测试，混合已知命中与原网段随机样本，超时和重试相同。附加对照流量最高200请求/秒；低负载轮短暂降低后台并发，随后恢复。报告保留24小时，未命中地址不持久保存。');
+  if(!report)return;
+  const states={running:'进行中',completed:'已完成',failed:'失败',cancelled:'已取消',interrupted:'服务重启中断'};
+  add(`对照${states[report.status]||report.status} · ${report.completed_checks||0}/${report.total_checks||0} 次 · ${report.status==='running'?(report.phase||''):''} · 已知命中样本 ${report.known_hit_samples??'—'}/${report.sample_size||0} · 低并发 ${report.low_concurrency??'—'} / 高并发 ${report.high_concurrency??'—'}`);
+  for(const pass of report.passes||[])add(`${pass.mode==='low'?'低':'高'}并发 ${pass.concurrency} · 后台并发上限 ${(pass.background||[]).map(x=>x.limit).join('/')||'无运行任务'} · ${pass.elapsed}秒 · ${diagnosisText(pass.counts)}`);
+  if(report.status==='completed'){add(`低并发两次均命中、高并发两次均未命中：${report.repeated_low_only} 个；证据或命中次数存在差异：${report.discrepancies.length} 个。`);add(report.interpretation);for(const item of report.discrepancies)add(`${item.ip}:${item.port} · 命中低${item.low_hits}/2 高${item.high_hits}/2 · 双域名低${item.low_confirmed}/2 高${item.high_confirmed}/2`);}
+  if(report.error)add(report.error);
+  if(report.limitation)add(report.limitation);
+}

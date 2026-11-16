@@ -52,6 +52,38 @@ class AdaptiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(sample['cpu_capacity'],0)
         self.assertGreater(sample['fd_limit'],0)
 
+    async def test_one_completion_does_not_wake_every_throttled_worker(self):
+        limiter=AdaptiveLimiter(100)
+        limiter.limit=1
+        release=asyncio.Event()
+        entered=[]
+        waits=0
+        original_wait=limiter.condition.wait
+        async def counted_wait():
+            nonlocal waits
+            waits+=1
+            return await original_wait()
+        async def worker(i):
+            async with limiter.slot(lambda:False):
+                entered.append(i)
+                await release.wait()
+                release.clear()
+        with patch.object(limiter.condition,'wait',counted_wait):
+            tasks=[asyncio.create_task(worker(i)) for i in range(10)]
+            try:
+                for _ in range(100):
+                    await asyncio.sleep(0)
+                self.assertEqual(len(entered),1)
+                self.assertEqual(waits,9)
+                release.set()
+                for _ in range(100):
+                    await asyncio.sleep(0)
+                self.assertEqual(len(entered),2)
+                self.assertEqual(waits,9)
+            finally:
+                for task in tasks:task.cancel()
+                await asyncio.gather(*tasks,return_exceptions=True)
+
 
 class ProviderTests(unittest.TestCase):
     def setUp(self):
@@ -67,12 +99,12 @@ class ProviderTests(unittest.TestCase):
         self.fail('refresh did not finish')
 
     def test_presets_and_strict_target_selection(self):
-        self.assertEqual(len(self.store.list()),5)
+        self.assertEqual(len(self.store.list()),2)
         p,nets=self.store.resolve('dmit')
         self.assertTrue(nets)
         _,selected=self.store.resolve('dmit',nets[:2])
         self.assertEqual(selected,nets[:2])
-        with self.assertRaises(ValueError):self.store.resolve('bwh')
+        self.assertTrue(self.store.resolve('bwh')[1])
         with self.assertRaises(ValueError):self.store.resolve('dmit',['8.8.8.0/24'])
         self.assertEqual(parse_asns('AS20473, 14061 AS20473'),[14061,20473])
         with self.assertRaises(ValueError):parse_asns('20473/../../etc/passwd')
@@ -80,11 +112,12 @@ class ProviderTests(unittest.TestCase):
     def test_refresh_failure_preserves_last_good_cache(self):
         with patch('providers.fetch_prefixes',return_value=['8.8.8.0/24']):
             self.store.refresh('bwh');self.wait_refresh('bwh')
-        self.assertEqual(self.store.get('bwh')['networks'],['8.8.8.0/24'])
+        self.assertIn('8.8.8.0/24',self.store.get('bwh')['networks'])
+        previous=self.store.get('bwh')['networks']
         with patch('providers.fetch_prefixes',side_effect=ValueError('source offline')):
             self.store.refresh('bwh');self.wait_refresh('bwh')
         cached=self.store.get('bwh')
-        self.assertEqual(cached['networks'],['8.8.8.0/24'])
+        self.assertEqual(cached['networks'],previous)
         self.assertIn('source offline',cached['error'])
         reloaded=ProviderStore(self.store.path)
         self.assertEqual(reloaded.get('bwh')['networks'],cached['networks'])
@@ -102,11 +135,11 @@ class ProviderTests(unittest.TestCase):
 
 
 class RegionalProviderTests(unittest.TestCase):
-    def test_only_requested_five_presets_are_available(self):
+    def test_only_dmit_bwh_presets_are_available(self):
         from providers import PRESETS
-        self.assertEqual({p['id'] for p in PRESETS},{'dmit','bwh','gomami_hk','vmiss_us','isif_hk'})
+        self.assertEqual({p['id'] for p in PRESETS},{'dmit','bwh'})
         self.assertFalse(any(p.get('country') for p in PRESETS))
-        self.assertEqual(sum(p.get('scope')=='all_announced' for p in PRESETS),3)
+        self.assertEqual(len(PRESETS),2)
 
     def test_longest_geofeed_prefix_overrides_broad_country(self):
         from providers import regional_prefixes
@@ -123,32 +156,36 @@ class RegionalProviderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'providers.json'
             store=ProviderStore(path)
-            store.state['cache']['vultr']=dict(networks=['1.1.1.0/24'])
+            for key in ['vultr','gomami_hk','vmiss_us','isif_hk']:
+                store.state['cache'][key]=dict(networks=['1.1.1.0/24'])
             store.state['cache']['bwh']=dict(networks=['8.8.8.0/24'])
             store.save()
             reloaded=ProviderStore(path)
-            self.assertNotIn('vultr',json.loads(path.read_text())['cache'])
-            self.assertEqual(reloaded.get('bwh')['networks'],['8.8.8.0/24'])
+            self.assertEqual(set(json.loads(path.read_text())['cache']),{'dmit','bwh'})
+            self.assertIn('8.8.8.0/24',reloaded.get('bwh')['networks'])
 
-    def test_all_region_refresh_rejects_old_regional_cache(self):
-        from providers import PRESETS, fetch_profile
-        for profile in PRESETS[2:]:
+    def test_refresh_and_restart_preserve_merged_coverage(self):
+        from providers import PRESETS, saved_prefixes
+        for profile in PRESETS:
             with self.subTest(provider=profile['id']),tempfile.TemporaryDirectory() as tmp:
                 store=ProviderStore(Path(tmp)/'providers.json')
                 key=profile['id']
-                store.state['cache'][key]=dict(networks=['1.1.1.0/24'],country='HK',asns=profile['asns'])
-                with self.assertRaises(ValueError):store.resolve(key)
-                with patch('providers.fetch_prefixes',return_value=['8.8.8.0/24','1.1.1.0/24']),patch('providers.fetch_geofeed',side_effect=AssertionError('all-region profiles must not use geofeed')):
+                store.state['cache'][key]['networks'] += ['1.1.1.0/24']
+                store.save()
+                with patch('providers.fetch_prefixes',return_value=['8.8.8.0/24']):
                     store.refresh(key)
                     for _ in range(200):
                         if not store.get(key)['refreshing']:break
                         time.sleep(.01)
-                self.assertEqual(store.resolve(key)[1],['8.8.8.0/24','1.1.1.0/24'])
-                self.assertEqual(ProviderStore(store.path).resolve(key)[1],['8.8.8.0/24','1.1.1.0/24'])
+                networks=store.resolve(key)[1]
+                self.assertTrue(set(saved_prefixes(key)) <= set(networks))
+                self.assertIn('1.1.1.0/24',networks)
+                self.assertIn('8.8.8.0/24',networks)
+                self.assertEqual(ProviderStore(store.path).resolve(key)[1],networks)
                 with patch('providers.fetch_prefixes',side_effect=ValueError('upstream offline')):
                     store.refresh(key)
                     for _ in range(200):
                         if not store.get(key)['refreshing']:break
                         time.sleep(.01)
-                self.assertEqual(len(store.resolve(key)[1]),2)
+                self.assertEqual(store.resolve(key)[1],networks)
                 self.assertIn('upstream offline',store.get(key)['error'])

@@ -1,4 +1,6 @@
 import json
+import asyncio
+import threading
 import tempfile
 import time
 import unittest
@@ -15,13 +17,61 @@ class EngineTests(unittest.TestCase):
 
     def tearDown(self):
         self.manager.stop()
-        if self.manager.thread:
-            self.manager.thread.join(5)
+        self.manager.join(5)
         self.tmp.cleanup()
 
     def wait(self):
         self.manager.thread.join(5)
         self.assertFalse(self.manager.thread.is_alive())
+
+    def test_parallel_tasks_stop_resume_and_delete_isolation(self):
+        entered = {443: threading.Event(), 8443: threading.Event()}
+        release = threading.Event()
+        async def fake(ip, port, *args, **kwargs):
+            entered[port].set()
+            while not release.is_set():
+                if kwargs['stopping']():
+                    raise asyncio.CancelledError()
+                await asyncio.sleep(.01)
+            return dict(ip=ip, port=port, status='hit', verified='', latency_ms=1)
+        with patch('engine.probe', fake):
+            first = self.manager.start(dict(targets='8.8.8.0/30', ports='443', concurrency=1))
+            second = self.manager.start(dict(targets='8.8.8.0/30', ports='8443', concurrency=1))
+            self.assertTrue(entered[443].wait(3))
+            self.assertTrue(entered[8443].wait(3))
+            self.assertEqual(sum(j['status']=='running' for j in self.manager.jobs()), 2)
+            with self.assertRaises(ValueError):
+                self.manager.start(resume=second)
+            with self.assertRaises(ValueError):
+                self.manager.delete(first)
+            self.manager.stop(first)
+            deadline = time.monotonic()+3
+            while first in self.manager.runners and time.monotonic()<deadline:
+                time.sleep(.01)
+            self.assertNotIn(first, self.manager.runners)
+            self.assertIn(second, self.manager.runners)
+            self.manager.delete(first)
+            release.set()
+            self.manager.join(5)
+            self.assertEqual(self.manager.results(second, 'all')['total'], 2)
+            self.assertEqual(next(j for j in self.manager.jobs() if j['id']==second)['status'], 'completed')
+
+    def test_parallel_writers_and_retest(self):
+        async def fake(ip, port, *args, **kwargs):
+            await asyncio.sleep(.002)
+            return dict(ip=ip, port=port, status='hit', verified='', latency_ms=1)
+        with patch('engine.probe', fake):
+            first = self.manager.start(dict(targets='8.8.8.0/27', ports='443', concurrency=3))
+            second = self.manager.start(dict(targets='8.8.8.0/27', ports='8443', concurrency=3))
+            self.manager.join(10)
+            for ident in (first, second):
+                self.assertEqual(self.manager.results(ident, 'all')['total'], 30)
+            third = self.manager.start(retest=first)
+            fourth = self.manager.start(retest=second)
+            self.manager.join(10)
+            for ident in (third, fourth):
+                self.assertEqual(self.manager.results(ident, 'all')['total'], 30)
+            self.assertTrue(all(j['status']=='completed' for j in self.manager.jobs()))
 
     def test_validation_and_overlap(self):
         config = prepare({'targets': '8.8.8.0/30\n8.8.8.1/32', 'ports': '443,443'})
@@ -31,12 +81,12 @@ class EngineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 prepare(raw)
 
-    def test_concurrency_upper_bound(self):
-        for value in [300,1000,1001,5000]:
-            config=prepare({'targets':'8.8.8.8','concurrency':value,'min_concurrency':5000})
+    def test_concurrency_without_upper_bound(self):
+        for value in [1,300,1000,1001,5000,5001,1000000]:
+            config=prepare({'targets':'8.8.8.8','concurrency':value,'min_concurrency':1000000})
             self.assertEqual(config['concurrency'],value)
             self.assertEqual(config['min_concurrency'],value)
-        for value in [0,5001]:
+        for value in [0,-1]:
             with self.assertRaises(ValueError):prepare({'targets':'8.8.8.8','concurrency':value})
 
     def test_request_rate_upper_bound(self):
@@ -56,7 +106,9 @@ class EngineTests(unittest.TestCase):
             ident = self.manager.start({'targets':'8.8.8.0/30','ports':'443','concurrency':1,'provider':'retired_example','provider_name':'旧服务商快照'})
             self.wait()
         self.assertEqual(self.manager.jobs()[0]['status'], 'stopped')
-        self.assertEqual(self.manager.results(ident, 'all')['total'], 1)
+        self.assertEqual(self.manager.results(ident, 'all')['total'], 0)
+        with connect(self.manager.path) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM scan_progress WHERE job=?',(ident,)).fetchone()[0],1)
         self.assertEqual(self.manager.results(ident, 'hits')['total'], 0)
         with connect(self.manager.path) as db:
             db.execute("UPDATE jobs SET status='running' WHERE id=?", (ident,))
@@ -170,7 +222,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.manager.results(ident,'all')['total'],4)
         self.assertEqual(self.manager.jobs()[0]['done'],6)
 
-    def test_startup_cleans_completed_only_and_preserves_paused_checkpoints(self):
+    def test_startup_cleans_nonhits_and_preserves_recent_paused_progress(self):
         async def fail(ip,port,*args,**kwargs):
             return dict(ip=ip,port=port,status='closed_or_error',verified='',latency_ms=1)
         with patch('engine.probe',fail):
@@ -179,16 +231,18 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.manager.results(completed,'all')['total'],0)
         def seed(db,job,ip):
             data=dict(ip=ip,port=443,status='open_not_cf')
-            db.execute('INSERT INTO results(job,ip,port,status,data,evidence) VALUES (?,?,?,?,?,?)',(job,ip,443,'open_not_cf',json.dumps(data),'none'))
+            db.execute('INSERT INTO results(job,ip,port,status,data,evidence,observed) VALUES (?,?,?,?,?,?,?)',(job,ip,443,'open_not_cf',json.dumps(data),'none',time.time()))
             db.execute('INSERT INTO observations VALUES (?,?,?,?,?,?)',(job,ip,443,1,0,0))
         with connect(self.manager.path) as db:
             seed(db,completed,'8.8.8.8')
             cfg=prepare({'targets':'1.1.1.0/30','ports':'443'})
-            db.execute('INSERT INTO jobs(id,created,updated,status,config,total,done,hits) VALUES (?,?,?,?,?,?,?,?)',('paused',2,2,'stopped',json.dumps(cfg),2,1,0))
+            db.execute('INSERT INTO jobs(id,created,updated,status,config,total,done,hits) VALUES (?,?,?,?,?,?,?,?)',('paused',time.time(),time.time(),'stopped',json.dumps(cfg),2,1,0))
             seed(db,'paused','1.1.1.1')
         self.manager=Manager(self.manager.path)
         self.assertEqual(self.manager.results(completed,'all')['total'],0)
-        self.assertEqual(self.manager.results('paused','all')['total'],1)
+        self.assertEqual(self.manager.results('paused','all')['total'],0)
+        with connect(self.manager.path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM scan_progress WHERE job='paused'").fetchone()[0],1)
         calls=[]
         async def finish(ip,port,*args,**kwargs):
             calls.append(ip)

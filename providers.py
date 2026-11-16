@@ -14,15 +14,15 @@ import uuid
 
 PRESETS=[
     dict(id='dmit',name='DMIT',asns=[906,132110,32519]),
-    dict(id='bwh',name='BWH / 搬瓦工（IT7）',asns=[25820],notes='IT7 主网 ASN 公告，不保证覆盖所有机房、线路及租用网段。',reference='https://www.it7.net/'),
-    # Keep existing IDs so saved task provenance and bookmarks remain stable.
-    dict(id='gomami_hk',name='GoMami · 全部地区',asns=[36002],scope='all_announced',
-         notes='AS36002 当前公告的全部公网 IPv4，不限制地区；可能不包含由其他 ASN 公告的租用网段。',reference='https://docs.gomami.io/en/network/locations/'),
-    dict(id='vmiss_us',name='VMISS · 全部地区',asns=[400464,967],scope='all_announced',
-         notes='AS400464 / AS967 当前公告的全部公网 IPv4，不限制地区；可能不包含由其他 ASN 公告的租用网段。',reference='https://www.vmiss.com/'),
-    dict(id='isif_hk',name='ISIF Cloud · 全部地区',asns=[209554,154162],scope='all_announced',
-         notes='AS209554 / AS154162 当前公告的全部公网 IPv4，不限制地区；可能不包含由其他 ASN 公告的租用网段。',reference='https://cloud.isif.net/'),
+    dict(id='bwh',name='BWH / 搬瓦工（IT7）',asns=[25820],reference='https://www.it7.net/'),
 ]
+
+
+def saved_prefixes(key):
+    if key not in ('dmit','bwh'):
+        return []
+    return normalize((Path(__file__).resolve().parent / (key+'_prefixes.txt')).read_text().split())
+
 
 MAX_BYTES=8*1024*1024
 
@@ -112,7 +112,7 @@ def fetch_profile(profile):
     networks=fetch_prefixes(profile['asns'])
     if profile.get('country'):
         networks=regional_prefixes(networks,fetch_geofeed(profile['geofeed']),profile['country'])
-    return networks
+    return normalize(networks + saved_prefixes(profile['id']))
 
 
 class ProviderStore:
@@ -136,10 +136,15 @@ class ProviderStore:
             if retired:
                 self.state['cache']={key:value for key,value in self.state['cache'].items() if key in allowed}
                 self.save()
-        if 'dmit' not in self.state['cache']:
-            text=(Path(__file__).resolve().parent/'dmit_prefixes.txt').read_text()
-            networks=normalize([line.split('#',1)[0].strip() for line in text.splitlines() if line.split('#',1)[0].strip()])
-            self.state['cache']['dmit']=dict(networks=networks,updated_at=None,source='项目内置静态快照')
+        changed=False
+        for key in ('dmit','bwh'):
+            cache=self.state['cache'].get(key,{})
+            networks=normalize(cache.get('networks',[]) + saved_prefixes(key))
+            if networks != cache.get('networks'):
+                self.state['cache'][key]=dict(cache,networks=networks,source='合并网段',updated_at=cache.get('updated_at'))
+                changed=True
+        if changed:
+            self.save()
 
     def save(self):
         encoded=json.dumps(self.state,ensure_ascii=False).encode()
@@ -199,7 +204,9 @@ class ProviderStore:
                 networks=fetch_profile(profile)
                 with self.lock:
                     previous=self.state['cache'].get(key)
-                    self.state['cache'][key]=dict(networks=networks,updated_at=time.time(),source=('RIPEstat 公告 ∩ '+profile['country']+' Geofeed') if profile.get('country') else 'RIPEstat ASN 公告前缀',scope=profile.get('scope'),country=profile.get('country'),geofeed=profile.get('geofeed'),asns=profile['asns'])
+                    if key in ('dmit','bwh'):
+                        networks=normalize(networks + (previous or {}).get('networks',[]))
+                    self.state['cache'][key]=dict(networks=networks,updated_at=time.time(),source=('RIPEstat 公告 ∩ '+profile['country']+' Geofeed') if profile.get('country') else ('合并网段' if key in ('dmit','bwh') else 'RIPEstat ASN 公告前缀'),scope=profile.get('scope'),country=profile.get('country'),geofeed=profile.get('geofeed'),asns=profile['asns'])
                     try:self.save()
                     except BaseException:
                         if previous is None:self.state['cache'].pop(key,None)
