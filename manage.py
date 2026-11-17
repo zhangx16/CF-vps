@@ -187,68 +187,86 @@ def compact():
     source = target / 'scan.db'
     if not source.is_file():
         raise ValueError('数据库不存在')
-    with (target / 'maintenance.lock').open('a') as maintenance:
+    with (target / 'compact.lock').open('a') as compaction:
         owner = source.stat()
-        os.fchown(maintenance.fileno(), owner.st_uid, owner.st_gid)
-        os.fchmod(maintenance.fileno(), 0o600)
-        fcntl.flock(maintenance, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        safety = backup()
-        was_active = active()
-        run('systemctl', 'stop', 'cf-vps')
-        try:
-            with (target / 'server.lock').open('a') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                os.fchown(lock.fileno(), owner.st_uid, owner.st_gid)
-                stat = source.stat()
-                with closing(sqlite3.connect(source, timeout=15)) as db:
-                    checkpoint = db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
-                    if checkpoint[0]:
-                        raise ValueError('数据库仍被占用，无法 compact')
-                    before = (db.execute('PRAGMA page_count').fetchone()[0],
-                              db.execute('PRAGMA freelist_count').fetchone()[0], source.stat().st_size)
-                    needed = before[0] * db.execute('PRAGMA page_size').fetchone()[0]
-                    if shutil.disk_usage(target).free < needed + 16 * 1024 * 1024:
-                        raise ValueError('数据库目录可用空间不足，compact 需要额外一个数据库大小及 16 MiB')
-                    fd, name = tempfile.mkstemp(prefix='.compact-', suffix='.db', dir=target)
-                    os.close(fd)
-                    temporary = Path(name)
+        os.fchown(compaction.fileno(), owner.st_uid, owner.st_gid)
+        os.fchmod(compaction.fileno(), 0o600)
+        fcntl.flock(compaction, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with (target / 'maintenance.lock').open('a') as maintenance:
+            owner = source.stat()
+            os.fchown(maintenance.fileno(), owner.st_uid, owner.st_gid)
+            os.fchmod(maintenance.fileno(), 0o600)
+            fcntl.flock(maintenance, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            safety = backup()
+            was_active = active()
+            run('systemctl', 'stop', 'cf-vps')
+            try:
+                with (target / 'server.lock').open('a') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    os.fchown(lock.fileno(), owner.st_uid, owner.st_gid)
+                    stat = source.stat()
+                    with closing(sqlite3.connect(source, timeout=15)) as db:
+                        checkpoint = db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+                        if checkpoint[0]:
+                            raise ValueError('数据库仍被占用，无法 compact')
+                        before = (db.execute('PRAGMA page_count').fetchone()[0],
+                                  db.execute('PRAGMA freelist_count').fetchone()[0], source.stat().st_size)
+                        needed = before[0] * db.execute('PRAGMA page_size').fetchone()[0]
+                        if shutil.disk_usage(target).free < needed + 16 * 1024 * 1024:
+                            raise ValueError('数据库目录可用空间不足，compact 需要额外一个数据库大小及 16 MiB')
+                        fd, name = tempfile.mkstemp(prefix='.compact-', suffix='.db', dir=target)
+                        os.close(fd)
+                        temporary = Path(name)
+                        try:
+                            # The setting takes effect in the VACUUM output, not the old file.
+                            db.execute('PRAGMA auto_vacuum=INCREMENTAL')
+                            db.execute('VACUUM INTO ?', (str(temporary),))
+                            with closing(sqlite3.connect(temporary)) as check:
+                                if check.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
+                                    raise ValueError('compact 数据库校验失败')
+                                after = (check.execute('PRAGMA page_count').fetchone()[0],
+                                         check.execute('PRAGMA freelist_count').fetchone()[0], temporary.stat().st_size)
+                            os.chown(temporary, stat.st_uid, stat.st_gid)
+                            os.chmod(temporary, 0o600)
+                            with temporary.open('rb') as output:
+                                os.fsync(output.fileno())
+                        except BaseException:
+                            temporary.unlink(missing_ok=True)
+                            raise
                     try:
-                        # The setting takes effect in the VACUUM output, not the old file.
-                        db.execute('PRAGMA auto_vacuum=INCREMENTAL')
-                        db.execute('VACUUM INTO ?', (str(temporary),))
-                        with closing(sqlite3.connect(temporary)) as check:
-                            if check.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
-                                raise ValueError('compact 数据库校验失败')
-                            after = (check.execute('PRAGMA page_count').fetchone()[0],
-                                     check.execute('PRAGMA freelist_count').fetchone()[0], temporary.stat().st_size)
-                        os.chown(temporary, stat.st_uid, stat.st_gid)
-                        os.chmod(temporary, 0o600)
-                        with temporary.open('rb') as output:
-                            os.fsync(output.fileno())
-                    except BaseException:
-                        temporary.unlink(missing_ok=True)
-                        raise
-                try:
-                    # Hard-link before the atomic replacement: no missing-source window.
-                    saved = target / 'scan.db.bak'
-                    saved.unlink(missing_ok=True)
-                    os.link(source, saved)
-                    os.chmod(saved, 0o600)
-                    for suffix in ('-wal', '-shm'):
-                        Path(str(source) + suffix).unlink(missing_ok=True)
-                    os.replace(temporary, source)
-                    directory = os.open(target, os.O_RDONLY)
-                    try:
-                        os.fsync(directory)
+                        # Hard-link before the atomic replacement: no missing-source window.
+                        saved = target / 'scan.db.bak'
+                        saved.unlink(missing_ok=True)
+                        os.link(source, saved)
+                        os.chmod(saved, 0o600)
+                        for suffix in ('-wal', '-shm'):
+                            Path(str(source) + suffix).unlink(missing_ok=True)
+                        os.replace(temporary, source)
+                        directory = os.open(target, os.O_RDONLY)
+                        try:
+                            os.fsync(directory)
+                        finally:
+                            os.close(directory)
+                        (target / 'vacuum.needed').unlink(missing_ok=True)
                     finally:
-                        os.close(directory)
-                    (target / 'vacuum.needed').unlink(missing_ok=True)
-                finally:
-                    temporary.unlink(missing_ok=True)
-                print(f'compact 完成：page_count / freelist / bytes {before} -> {after}\n备份：{safety}；原库：{saved}')
-        finally:
-            if was_active:
-                run('systemctl', 'start', 'cf-vps')
+                        temporary.unlink(missing_ok=True)
+                    print(f'compact 完成：page_count / freelist / bytes {before} -> {after}\n备份：{safety}；原库：{saved}')
+            finally:
+                if was_active:
+                    run('systemctl', 'start', 'cf-vps')
+
+
+def health():
+    require_install()
+    # The installed manager is also copied to /usr/local/bin.
+    sys.path.insert(0, str(APP))
+    from health import database_health, rss_bytes
+    metrics = database_health(data_dir() / 'scan.db')
+    result = run('systemctl', 'show', 'cf-vps', '--property=MainPID', '--value', capture=True)
+    pid = result.stdout.strip()
+    metrics['rss_bytes'] = rss_bytes(pid) if pid.isdigit() and int(pid) > 0 else None
+    print(json.dumps(metrics, ensure_ascii=False, indent=2))
+    return metrics
 
 
 def install(upgrade=False):
@@ -672,7 +690,7 @@ def menu():
 
 def main():
     parser = argparse.ArgumentParser(description='CF VPS 中文管理菜单及快捷命令')
-    parser.add_argument('command', nargs='?', default='menu', choices=['menu','install','upgrade','status','info','start','stop','restart','logs','backup','backups','restore','public','private','port','password','uninstall','domain','rollback','retention','compact'])
+    parser.add_argument('command', nargs='?', default='menu', choices=['menu','install','upgrade','status','info','start','stop','restart','logs','backup','backups','restore','public','private','port','password','uninstall','domain','rollback','retention','compact','health'])
     parser.add_argument('value', nargs='?', help='restore 的备份路径或 port 的端口号')
     parser.add_argument('--purge', action='store_true', help='卸载时同时删除配置和扫描数据，仍保留自动备份')
     args = parser.parse_args()
@@ -698,6 +716,8 @@ def main():
                 run('systemctl', cmd, 'cf-vps')
             elif cmd == 'logs':
                 run('journalctl', '-u', 'cf-vps', '-n', '100', '--no-pager')
+            elif cmd == 'health':
+                health()
             elif cmd == 'compact':
                 compact()
             elif cmd == 'backup':

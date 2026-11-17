@@ -2,7 +2,7 @@
 import fcntl
 import os
 from pathlib import Path
-from engine import connect, prune_retention
+from db import connect, prune_retention
 
 
 def maintain(path):
