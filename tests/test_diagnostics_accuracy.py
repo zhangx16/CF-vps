@@ -90,7 +90,10 @@ class AccuracyTests(unittest.TestCase):
     def test_failed_audit_restores_background_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager=self.make_manager(tmp)
-            controller=AdaptiveLimiter(16000,enabled=False)
+            async def make_controller():
+                # Python 3.9 binds asyncio synchronization objects at construction.
+                return AdaptiveLimiter(16000,enabled=False)
+            controller=asyncio.run(make_controller())
             manager.runners['job']=dict(controller=controller)
             async def fail(*args,**kwargs):
                 self.assertEqual(controller.audit_limit,4)
