@@ -1,4 +1,4 @@
-"""Desktop validation imports and exports."""
+"""Endpoint validation imports and exports."""
 import ipaddress
 import time
 from db import connect
