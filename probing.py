@@ -1,5 +1,6 @@
 """Bounded HTTPS observations. Evidence describes responses, never proves Reality."""
 import asyncio
+from contextlib import asynccontextmanager
 import ipaddress
 import re
 import socket
@@ -145,7 +146,17 @@ async def probe_once(ip, port, sni, timeout):
     return r['is_cf'], r['server'], r['cf_ray'], r['trace'], r['head'], r['err'], r['request_ms'] if not r['err'] else ''
 
 
-async def probe(ip, port, timeout, sem, attempts=1, pace=None, stopping=None):
+@asynccontextmanager
+async def legacy_slot(sem):
+    """The standalone CLI may supply its own gate; scans use AdaptiveLimiter."""
+    if sem is None:
+        yield
+    else:
+        async with sem:
+            yield
+
+
+async def probe(ip, port, timeout, sem=None, attempts=1, pace=None, stopping=None, **kwargs):
     async def request(sni):
         observation = None
         for attempt in range(attempts):
@@ -160,7 +171,7 @@ async def probe(ip, port, timeout, sem, attempts=1, pace=None, stopping=None):
                 break
         return observation
 
-    async with sem:
+    async with legacy_slot(sem):
         first = await request(PRIMARY_SNI)
         result = dict(ip=ip, port=port, status='hit' if first['is_cf'] else 'closed_or_error' if first['err'] else 'open_not_cf',
                       evidence='suspected' if first['is_cf'] else 'none', server=first['server'], cf_ray=first['cf_ray'],
