@@ -26,6 +26,14 @@ FIELDS = ['ip', 'port', 'job_id', 'task_name', 'provider_name', 'status', 'evide
 def open_db(path):
     db = sqlite3.connect(path, timeout=15)
     db.row_factory = sqlite3.Row
+    # Changing this on an existing incremental database takes a writer lock.
+    # Only initialize empty files; legacy conversion belongs to offline compact.
+    if db.execute('PRAGMA page_count').fetchone()[0] == 0:
+        db.execute('PRAGMA auto_vacuum=INCREMENTAL')
+    db.execute('PRAGMA cache_size=-8000')
+    db.execute('PRAGMA temp_store=MEMORY')
+    db.execute('PRAGMA busy_timeout=15000')
+    db.execute('PRAGMA wal_autocheckpoint=1000')
     return db
 
 
@@ -43,8 +51,9 @@ def connect(path, favorites=False):
         db.close()
 
 
-def prune_retention(path, now=None):
+def prune_retention(path, now=None, time_budget=None):
     """Keep only hits younger than 24h, including all independent result copies."""
+    deadline = None if time_budget is None else time.monotonic() + time_budget
     cutoff = (time.time() if now is None else now) - 86400
     with connect(path) as db:
         db.execute('PRAGMA secure_delete=ON')
@@ -58,6 +67,8 @@ def prune_retention(path, now=None):
             ('scan_progress', "COALESCE(observed,0)<=? OR job IN (SELECT id FROM jobs WHERE status='completed')", (cutoff,)),
         ]:
             while True:
+                if deadline is not None and time.monotonic() >= deadline:
+                    return
                 changed = db.execute(f'DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {condition} LIMIT 2000)', args).rowcount
                 db.commit()
                 if changed < 2000:
@@ -208,7 +219,7 @@ class Manager:
                 CREATE INDEX IF NOT EXISTS result_global_status ON results(status,loc);
             ''')
             db.execute("UPDATE jobs SET status='interrupted', updated=? WHERE status IN ('running','stopping')", (time.time(),))
-        prune_retention(self.path)
+        prune_retention(self.path, time_budget=5)
 
     def prune_completed_nonhits(self, ident=None):
         """Remove failure payloads/checkpoints only after a task is complete."""
