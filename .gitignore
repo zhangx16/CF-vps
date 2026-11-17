@@ -8,16 +8,3 @@ data/
 *.csv
 .env
 .venv/
-
-desktop/dist/
-desktop/core/
-desktop/state*.json
-desktop/*.exe
-
-desktop/tasks/
-desktop/打开界面.url
-desktop/last-core-error.txt
-
-# Portable archives are release artifacts, never source.
-desktop/dist/*.zip
-Xray-windows-64.zip
