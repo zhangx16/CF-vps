@@ -11,16 +11,24 @@ REF="${CFVPS_REF:-main}"
 [[ "$REF" =~ ^[a-zA-Z0-9._/-]+$ ]] || { echo '无效版本'; exit 1; }
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
-curl -fL --retry 3 --connect-timeout 15 --max-time 120 "https://api.github.com/repos/zhangx16/CF-vps/tarball/$REF" -o "$TMP_DIR/source.tar.gz"
-mkdir "$TMP_DIR/source"
-tar -xzf "$TMP_DIR/source.tar.gz" --strip-components=1 -C "$TMP_DIR/source"
-python3 -m py_compile "$TMP_DIR/source/server.py" "$TMP_DIR/source/engine.py" "$TMP_DIR/source/db.py" "$TMP_DIR/source/jobs.py" "$TMP_DIR/source/scan.py" "$TMP_DIR/source/query.py" "$TMP_DIR/source/favorites.py" "$TMP_DIR/source/confirmed.py" "$TMP_DIR/source/health.py" "$TMP_DIR/source/adaptive.py" "$TMP_DIR/source/providers.py" "$TMP_DIR/source/probing.py" "$TMP_DIR/source/accuracy.py" "$TMP_DIR/source/diagnostics.py" "$TMP_DIR/source/retention.py" "$TMP_DIR/source/scan_dmit_cf_fallback.py" "$TMP_DIR/source/manage.py"
-VERSION=$(python3 - "$TMP_DIR/source.tar.gz" <<'PY'
+if [[ -n "${CFVPS_SOURCE_DIR:-}" ]]; then
+  SOURCE_DIR=$(realpath "$CFVPS_SOURCE_DIR")
+  [[ -f "$SOURCE_DIR/server.py" && -d "$SOURCE_DIR/static" ]] || { echo '无效本地源码目录'; exit 1; }
+  mkdir "$TMP_DIR/source"
+  git -C "$SOURCE_DIR" archive HEAD | tar -x -C "$TMP_DIR/source"
+  VERSION="local-$(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
+else
+  curl -fL --retry 3 --connect-timeout 15 --max-time 120 "https://api.github.com/repos/zhangx16/CF-vps/tarball/$REF" -o "$TMP_DIR/source.tar.gz"
+  mkdir "$TMP_DIR/source"
+  tar -xzf "$TMP_DIR/source.tar.gz" --strip-components=1 -C "$TMP_DIR/source"
+  VERSION=$(python3 - "$TMP_DIR/source.tar.gz" <<'PYVERSION'
 import sys,tarfile
 with tarfile.open(sys.argv[1]) as archive:
     print(archive.next().name.split('/')[0])
-PY
+PYVERSION
 )
+fi
+python3 -m py_compile "$TMP_DIR/source/server.py" "$TMP_DIR/source/engine.py" "$TMP_DIR/source/db.py" "$TMP_DIR/source/jobs.py" "$TMP_DIR/source/scan.py" "$TMP_DIR/source/query.py" "$TMP_DIR/source/favorites.py" "$TMP_DIR/source/confirmed.py" "$TMP_DIR/source/health.py" "$TMP_DIR/source/adaptive.py" "$TMP_DIR/source/providers.py" "$TMP_DIR/source/probing.py" "$TMP_DIR/source/accuracy.py" "$TMP_DIR/source/diagnostics.py" "$TMP_DIR/source/retention.py" "$TMP_DIR/source/scan_dmit_cf_fallback.py" "$TMP_DIR/source/manage.py"
 install -d -m 755 /opt/cf-vps-releases /usr/local/bin
 id cf-vps >/dev/null 2>&1 || useradd --system --home-dir /var/lib/cf-vps --shell /usr/sbin/nologin cf-vps
 install -d -o cf-vps -g cf-vps -m 750 /var/lib/cf-vps
@@ -118,14 +126,14 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 /opt/cf-vps/server.py
 Restart=on-failure
 RestartSec=3
-TimeoutStopSec=110
+TimeoutStopSec=180
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/cf-vps
 UMask=0077
-LimitNOFILE=16384
+LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -164,6 +172,6 @@ if c.get('CFVPS_HOST')=='0.0.0.0' and shutil.which('ufw'):
     if state.returncode==0 and 'Status: active' in state.stdout:
         subprocess.run(['ufw','allow',str(int(c['CFVPS_PORT']))+'/tcp'],check=True)
 manage.prune_backups()
-manage.info(show_password=True)
+manage.info(show_password=not bool(os.environ.get('CFVPS_SOURCE_DIR')))
 PYINFO
 printf '\n安装完成。输入 cf-vps 打开管理菜单。公网访问需云安全组放行；可用 cf-vps domain 域名 配置 HTTPS。\n'

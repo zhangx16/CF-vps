@@ -336,7 +336,7 @@ def main():
         server.serve_forever()
     finally:
         manager.stop()
-        manager.join(timeout=100)
+        manager.join(timeout=160)
         server.server_close()
 
 
