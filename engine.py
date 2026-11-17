@@ -165,6 +165,8 @@ class Manager:
         self.path = str(path)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
+        self.source_lock = threading.Lock()
+        self.source_cache = {}
         self.thread = None
         self.stop_event = threading.Event()
         self.active = None
@@ -237,13 +239,15 @@ class Manager:
         with connect(self.path) as db:
             rows = [dict(r) for r in db.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT 100')]
             counts = {}
-            for r in db.execute('SELECT job,category,count FROM job_diagnostics'):
+            ids = [row['id'] for row in rows]
+            placeholders = ','.join('?' for _ in ids) or 'NULL'
+            for r in db.execute(f'SELECT job,category,count FROM job_diagnostics WHERE job IN ({placeholders})', ids):
                 counts.setdefault(r['job'], {})[r['category']] = r['count']
             for row in rows:
                 row['diagnostics'] = counts.get(row['id'], {})
         with self.lock:
             for row in rows:
-                row['config'] = self.source_config(json.loads(row['config']))
+                row['config'] = self.cached_source_config(row['id'], row['config'])
                 row['config'].pop('input_targets',None)
                 runtime = self.runners.get(row['id'])
                 if runtime:
@@ -259,7 +263,7 @@ class Manager:
             row=db.execute('SELECT * FROM jobs WHERE id=?',(ident,)).fetchone()
         if not row:
             raise ValueError('任务不存在')
-        config=self.source_config(json.loads(row['config']))
+        config=self.cached_source_config(row['id'], row['config'])
         original=config.get('input_targets')
         has_original=isinstance(original,str) and bool(original.strip())
         return dict(id=row['id'],created=row['created'],status=row['status'],total=row['total'],
@@ -277,11 +281,19 @@ class Manager:
                 config.update(provider='',provider_name='自定义 / 旧任务')
         return config
 
+    def cached_source_config(self, ident, raw):
+        with self.source_lock:
+            cached = self.source_cache.get(ident)
+            if cached is None or cached[0] != raw:
+                cached = (raw, self.source_config(json.loads(raw)))
+                self.source_cache[ident] = cached
+            return dict(cached[1])
+
     def job_sources(self):
         sources={}
         with connect(self.path) as db:
             for row in db.execute('SELECT id,created,status,config,done,hits FROM jobs ORDER BY created DESC'):
-                config=self.source_config(json.loads(row['config']))
+                config=self.cached_source_config(row['id'], row['config'])
                 sources[row['id']]=dict(id=row['id'],created=row['created'],status=row['status'],done=row['done'],hits=row['hits'],
                     task_name=config.get('task_name',''),provider=config.get('provider') or 'custom_targets',provider_name=config.get('provider_name') or '自定义目标',kind=config.get('kind','scan'))
         return sources
@@ -484,7 +496,10 @@ class Manager:
             iterator = iter(config['selected']) if 'selected' in config else ((r['ip'],r['port']) for r in source_db.execute("SELECT ip,port FROM results WHERE job=? AND status='hit' ORDER BY rowid", (config['source_id'],)))
         else:
             iterator = targets(config)
-        sem = asyncio.Semaphore(config['concurrency'])
+        # Compact integer keys avoid millions of Python tuples and IP strings.
+        completed = {(int(ipaddress.IPv4Address(row[0])) << 16) | row[1]
+                     for row in db.execute('SELECT ip,port FROM scan_progress WHERE job=?', (ident,))}
+        worker_count = min(config['concurrency'], 256, max(0, config['total'] - initial_done))
         limiter = RateLimiter(config.get('rps',100), stop_event.is_set)
         pending = 0
         writes = []
@@ -527,11 +542,11 @@ class Manager:
             for ip, port in iterator:
                 if stop_event.is_set():
                     return
-                if db.execute('SELECT 1 FROM scan_progress WHERE job=? AND ip=? AND port=?', (ident,ip,port)).fetchone():
+                if (int(ipaddress.IPv4Address(ip)) << 16) | port in completed:
                     continue
                 try:
                     async with controller.slot(stop_event.is_set):
-                        result = await probe(ip, port, config['timeout'], sem,
+                        result = await probe(ip, port, config['timeout'], None,
                                              attempts=config.get('attempts',1), pace=limiter.wait,
                                              stopping=stop_event.is_set)
                 except asyncio.CancelledError:
@@ -560,7 +575,7 @@ class Manager:
                     runtime['live'] = dict(done=done,hits=hits,rate=round(rate,2),eta=round((config['total']-done)/rate) if rate else None)
                 if pending >= 50:
                     save()
-        tasks = [asyncio.create_task(worker()) for _ in range(min(config['concurrency'], max(0, config['total'] - initial_done)))]
+        tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
         timer = asyncio.create_task(commit_timer())
         resource_task = asyncio.create_task(resource_monitor())
         try:
@@ -645,13 +660,26 @@ class Manager:
             rows = db.execute(f'SELECT rowid,job,{key} AS sortkey,data FROM results WHERE {where} ORDER BY {key} {direction},rowid DESC LIMIT ?',values+[limit+1]).fetchall()
             more = len(rows)>limit
             rows = rows[:limit]
+            decoded = [json.loads(row['data']) for row in rows]
+            endpoints = list({(data['ip'], data['port']) for data in decoded})
+            history, confirmed, favorites_set = {}, set(), set()
+            if endpoints:
+                pairs = ','.join('(?,?)' for _ in endpoints)
+                params = [value for endpoint in endpoints for value in endpoint]
+                for r in db.execute(f'SELECT ip,port,MIN(CASE WHEN hit=1 THEN observed END) AS first_seen,MAX(CASE WHEN confirmed=1 THEN observed END) AS last_confirmed,COUNT(*) AS checks,COALESCE(SUM(hit),0) AS successes,COALESCE(SUM(confirmed),0) AS confirmations FROM observations WHERE (ip,port) IN (VALUES {pairs}) GROUP BY ip,port', params):
+                    entry = dict(r)
+                    endpoint = (entry.pop('ip'), entry.pop('port'))
+                    history[endpoint] = entry
+                triples = ','.join('(?,?,?)' for _ in rows)
+                confirmed_params = [value for row, data in zip(rows, decoded) for value in (row['job'], data['ip'], data['port'])]
+                confirmed = {tuple(r) for r in db.execute(f'SELECT job,ip,port FROM confirmed_nodes WHERE (job,ip,port) IN (VALUES {triples})', confirmed_params)}
+                favorites_set = {tuple(r) for r in db.execute(f'SELECT ip,port FROM endpoint_favorites WHERE (ip,port) IN (VALUES {pairs})', params)}
             items = []
-            for row in rows:
-                data = json.loads(row['data'])
-                history = db.execute('SELECT MIN(CASE WHEN hit=1 THEN observed END) AS first_seen,MAX(CASE WHEN confirmed=1 THEN observed END) AS last_confirmed,COUNT(*) AS checks,COALESCE(SUM(hit),0) AS successes,COALESCE(SUM(confirmed),0) AS confirmations FROM observations WHERE ip=? AND port=?',(data['ip'],data['port'])).fetchone()
-                data['history'] = dict(history)
-                data['local_confirmed'] = db.execute('SELECT 1 FROM confirmed_nodes WHERE job=? AND ip=? AND port=?',(row['job'],data['ip'],data['port'])).fetchone() is not None
-                data['favorite'] = db.execute('SELECT 1 FROM endpoint_favorites WHERE ip=? AND port=?',(data['ip'],data['port'])).fetchone() is not None
+            for row, data in zip(rows, decoded):
+                endpoint = (data['ip'], data['port'])
+                data['history'] = history.get(endpoint, dict(first_seen=None, last_confirmed=None, checks=0, successes=0, confirmations=0))
+                data['local_confirmed'] = (row['job'], *endpoint) in confirmed
+                data['favorite'] = endpoint in favorites_set
                 source=sources.get(row['job'],{})
                 data.update(job_id=row['job'],task_name=source.get('task_name',data.get('task_name','')),provider_name=source.get('provider_name',data.get('provider_name','未知来源')),job_created=source.get('created',data.get('job_created')))
                 items.append(data)
