@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, quote
 
 from engine import FIELDS, Manager, connect
+from db import available, ConflictError, MaintenanceError
 from providers import ProviderStore
 
 ROOT = Path(__file__).resolve().parent
@@ -87,8 +88,40 @@ def make_handler(manager, password, providers=None):
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
-            # Do not log query strings, headers or credentials.
-            print(f'{self.address_string()} {self.command} {urlsplit(self.path).path}', flush=True)
+            # The final request log below omits query strings and credentials.
+            pass
+
+        def send_response(self, code, message=None):
+            self.response_status = code
+            super().send_response(code, message)
+
+        def handle_one_request(self):
+            started = time.monotonic()
+            self.response_status = None
+            try:
+                super().handle_one_request()
+            finally:
+                if self.response_status is not None:
+                    path = json.dumps(urlsplit(self.path).path, ensure_ascii=True)
+                    duration = (time.monotonic() - started) * 1000
+                    print(f'{self.address_string()} {self.command} {path} {self.response_status} {duration:.1f}ms', flush=True)
+
+        def dispatch(self, method):
+            if not self.authorized():
+                return
+            try:
+                with available(manager.path):
+                    method()
+            except MaintenanceError as exc:
+                self.reply(503, {'error': str(exc)}, extra={'Retry-After': '5'})
+            except ConflictError as exc:
+                self.reply(409, {'error': str(exc)})
+
+        def do_GET(self):
+            self.dispatch(self.get)
+
+        def do_POST(self):
+            self.dispatch(self.post)
 
         def reply(self, status, payload, kind='application/json; charset=utf-8', extra=None):
             if isinstance(payload, (dict, list)):
@@ -128,15 +161,15 @@ def make_handler(manager, password, providers=None):
                 return False
             return True
 
-        def do_GET(self):
-            if not self.authorized():
-                return
+        def get(self):
             parsed = urlsplit(self.path)
             query = parse_qs(parsed.query)
             try:
                 if parsed.path in ('/', '/app.js', '/style.css', '/fonts.css', '/providers.js', '/center.js'):
                     name, kind = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/fonts.css': ('fonts.css', 'text/css; charset=utf-8'), '/providers.js': ('providers.js', 'text/javascript; charset=utf-8'), '/center.js': ('center.js', 'text/javascript; charset=utf-8')}[parsed.path]
                     self.reply(200, (ROOT / 'static' / name).read_bytes(), kind)
+                elif parsed.path == '/api/health':
+                    self.reply(200, manager.health())
                 elif parsed.path == '/api/jobs':
                     self.reply(200, manager.jobs())
                 elif parsed.path == '/api/accuracy':
@@ -165,6 +198,8 @@ def make_handler(manager, password, providers=None):
                     self.export(query.get('id', [''])[0], query.get('view', ['hits'])[0], query.get('region',[''])[0], query.get('colo',[''])[0], query.get('search',[''])[0],query.get('provider',[''])[0],query.get('favorites',[''])[0]=='1')
                 else:
                     self.reply(404, {'error': '未找到'})
+            except ConflictError:
+                raise
             except (ValueError, TypeError) as exc:
                 self.reply(400, {'error': str(exc)})
             except (BrokenPipeError, ConnectionResetError):
@@ -208,9 +243,7 @@ def make_handler(manager, password, providers=None):
                         self.wfile.write(buf.getvalue().encode())
                     cursor = rows[-1]['rowid']
 
-        def do_POST(self):
-            if not self.authorized():
-                return
+        def post(self):
             if self.headers.get('X-Requested-With') != 'CF-VPS' or self.headers.get('Sec-Fetch-Site') == 'cross-site':
                 self.reply(403, {'error': '请求来源无效'})
                 return
@@ -268,6 +301,8 @@ def make_handler(manager, password, providers=None):
                     self.reply(200, {'ok': True})
                 else:
                     self.reply(404, {'error': '未找到'})
+            except ConflictError:
+                raise
             except (ValueError, TypeError) as exc:
                 self.reply(400, {'error': str(exc)})
 
